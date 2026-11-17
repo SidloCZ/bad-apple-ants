@@ -2,7 +2,11 @@
 name = "coastline-native-index"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Coastal centre index of the 10 m land/water mask"
 license = "MIT"
+repository = "https://github.com/ikuto32/bad-apple-earth-moon"
+publish = false
 
 [dependencies]
 anyhow = "1.0"

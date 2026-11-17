@@ -2,7 +2,11 @@
 name = "moon-search"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Exhaustive GPU pose search of Bad Apple!! frames on Kaguya and LROC images"
 license = "MIT"
+repository = "https://github.com/ikuto32/bad-apple-earth-moon"
+publish = false
 
 [dependencies]
 anyhow = "1.0"

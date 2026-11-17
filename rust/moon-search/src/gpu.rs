@@ -68,6 +68,10 @@ impl Gpu {
             })
             .collect();
         ensure!(
+            q32.len() == nq * 768 && q64.len() == nq * 3072,
+            "query buffers do not hold {nq} queries"
+        );
+        ensure!(
             world.data_base <= shard.bytes.start
                 && shard.bytes.end <= world.data_base + world.data.len(),
             "shard pixels are not loaded (World::fill)"
@@ -178,6 +182,7 @@ impl Gpu {
     }
     /// fp32 NCC of each pose against GEMM column qidx[i]; -2 for invalid or flat poses.
     pub fn score(&self, poses: &[Pose], qidx: &[i32], gw: usize) -> Result<Vec<f32>> {
+        ensure!(qidx.len() == poses.len(), "one query index per pose");
         let mut out = vec![0f32; poses.len()];
         let f = unsafe { self.lib.get::<Score>(b"mb_score\0")? };
         for (k, (part, qs)) in poses.chunks(SCRATCH).zip(qidx.chunks(SCRATCH)).enumerate() {

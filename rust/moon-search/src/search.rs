@@ -24,6 +24,33 @@ pub struct Checkpoint {
     pub topk: usize,
     pub rotations: u32,
     pub seconds: f64,
+    /// FNV-1a of the queries, the job list and the raster names; a checkpoint only resumes
+    /// a run with the same inputs (older checkpoints without it are not resumed).
+    #[serde(default)]
+    pub fingerprint: String,
+}
+
+fn fingerprint(queries: &frames::Queries, jobs: &[Job], world: &World, rotations: u32) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for &b in bytes {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(&rotations.to_le_bytes());
+    for v in queries.q32.iter().chain(&queries.q64) {
+        eat(&v.to_le_bytes());
+    }
+    for j in jobs {
+        eat(&j.raster.to_le_bytes());
+        eat(&j.step.to_le_bytes());
+        eat(&j.part.to_le_bytes());
+    }
+    for r in &world.rasters {
+        eat(r.name.as_bytes());
+        eat(&[0]);
+    }
+    format!("{h:016x}")
 }
 
 pub fn entries_to_bytes(e: &[Entry]) -> Vec<u8> {
@@ -84,12 +111,17 @@ pub fn run(
         topk,
         rotations,
         seconds: 0.0,
+        fingerprint: fingerprint(queries, &all_jobs, world, rotations),
     };
     // The running top-K lists travel from shard to shard (and through checkpoints).
     let mut lists: Option<Vec<Entry>> = None;
     if let Ok(text) = fs::read(out.join("checkpoint.json")) {
         let old: Checkpoint = serde_json::from_slice(&text)?;
-        if old.cols == ck.cols && old.jobs == ck.jobs && old.rotations == rotations {
+        if old.fingerprint == ck.fingerprint
+            && old.cols == ck.cols
+            && old.jobs == ck.jobs
+            && old.topk == ck.topk
+        {
             lists = Some(entries_from_bytes(
                 &fs::read(out.join("lists.bin")).context("lists.bin")?,
             ));
@@ -98,6 +130,10 @@ pub fn run(
                 old.next_job, old.jobs, old.poses
             );
             ck = old;
+        } else {
+            println!(
+                "checkpoint.json belongs to different inputs; starting this search from the beginning"
+            );
         }
     }
     let started = Instant::now();

@@ -20,8 +20,12 @@ function Find-CudaRoot {
 function Find-VcVars {
     $vsWhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path -LiteralPath $vsWhere)) { throw 'Visual Studio (C++ build tools) not found' }
-    $vsRoot = (& $vsWhere -latest -products '*' -property installationPath | Select-Object -First 1).Trim()
-    return Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
+    $vsRoot = & $vsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath |
+        Select-Object -First 1
+    if (-not $vsRoot) { throw 'Visual Studio with the C++ x64 build tools not found' }
+    $vcvars = Join-Path $vsRoot.Trim() 'VC\Auxiliary\Build\vcvars64.bat'
+    if (-not (Test-Path -LiteralPath $vcvars)) { throw "vcvars64.bat not found under $vsRoot" }
+    return $vcvars
 }
 
 function Build-CudaLibrary {

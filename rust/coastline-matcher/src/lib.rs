@@ -370,8 +370,10 @@ pub fn refine_fft(
     best
 }
 
-/// C ABI for small refinement batches. All pointers must refer to the stated
-/// contiguous buffers for the duration of the call. Output rows have 10 values.
+/// C ABI for small refinement batches. Output rows have 10 values.
+///
+/// # Safety
+/// All pointers must refer to the stated contiguous buffers for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coastline_refine_batch(
     pixels: *const u8,

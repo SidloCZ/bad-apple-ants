@@ -3,7 +3,7 @@ import pytest
 from PIL import Image
 from pyproj.enums import TransformDirection
 from badapple_coastline.atlas import view_transform, corners
-from badapple_coastline.local_map import geometry, map_xy, centre, LocalMaps, LocalMapCache, SIZE, HEADER
+from badapple_coastline.local_map import geometry, map_xy, LocalMaps, LocalMapCache, SIZE, HEADER
 
 
 def record(lon=20, lat=10, width=2, angle=30, mirror=False):

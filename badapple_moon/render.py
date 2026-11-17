@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw
 from .geometry import apply_quadratic, ortho_inverse
 from .ingest import GDAL_ENV
 
-WIDTH, HEIGHT = 1944, 1458  # the moon view of a 3840x2160 layout; downscaled for 2560x1920 (1728x1296)
+WIDTH, HEIGHT = 1944, 1458  # crop size; MoonLayout resizes it to the moon view (1899x1424 at 2560x1920)
 WAC_FILE = "assets/moon/raw/wac_100m.tif"
 WAC_METRES = 100.0
 WAC_STRETCH = (1.0, 193.0)  # 1-99 % of the global mosaic (cache/moon/tiles/wac.json)
@@ -155,7 +155,7 @@ def render_crop(best: dict, record: dict | None) -> np.ndarray:
     ok = ok.reshape(HEIGHT, s, WIDTH, s).all(axis=(1, 3))
     if ok.mean() < 0.5:
         raise ValueError(f"crop mostly outside data ({ok.mean():.2f})")
-    # Black point: the darker of the source image's 1 % (as at ingest) and this crop's 1 %, so shadows
+    # Black point: the larger of the source image's 1 % (as at ingest) and this crop's 1 %, so shadows
     # stay black. White point: this crop's highlights, but never below 20 % of the image's range so
     # noise inside a shadow is not amplified. A mild gamma keeps TC's onboard-compression blocks
     # in deep shadow out of sight.
@@ -313,10 +313,9 @@ def make_crops(
                 if path not in jobs:
                     jobs[path] = pool.submit(_crop_job, (cand, records.get(cand["raster"]), path))
             next_pending = {}
-            for n, (path, task) in enumerate(jobs.items(), 1):
+            for path, task in jobs.items():
                 try:
-                    stats, reason = task.result(), None
-                    reason = qa_failure(stats)
+                    reason = qa_failure(task.result())
                 except Exception as error:
                     reason = f"error {repr(error)[:120]}"
                 for u in owners[path]:
@@ -390,7 +389,7 @@ def preview(matches: dict, records: dict, video: Path, out: Path, frames: list[i
     sheet.save(out, quality=92)
 
 
-# ---- Layout on the ONE UNICODE grid: moon view, right column (ORIGINAL, maps), footer ----
+# ---- Layout on one shared grid: moon view, right column (ORIGINAL, maps), footer ----
 # Every text field has a fixed origin and baseline, a monospaced font and a fixed-width format, so a
 # changing value never moves or resizes anything else from one frame to the next.
 
@@ -896,6 +895,11 @@ def encode(
     from .sun import load_subsolar
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    missing = [r["unique"] for r in matches["results"] if r["best"] is None]
+    if missing:
+        raise ValueError(
+            f"{len(missing)} uniques have no accepted crop (first: {missing[:5]}); re-run crops with --fallback"
+        )
     gazetteer = Gazetteer()
     subsolar = load_subsolar({r["best"]["raster"] for r in matches["results"] if r["best"]["source"] == "tc"}, records)
     layout = MoonLayout(size)
@@ -995,7 +999,7 @@ def encode(
     for n, u in enumerate(frames):
         original = source.stdout.read(frame_bytes)
         if len(original) < frame_bytes:
-            break
+            raise RuntimeError(f"source video ended at frame {n} of {len(frames)}: check --video")
         result = results[u]
         best = result["best"]
         record = records.get(best["raster"])
@@ -1055,7 +1059,8 @@ def encode(
             print(f"\rframe {n}/{len(frames)} ({n / max(time.time() - started, 1e-3):.1f} fps)", end="", flush=True)
     print()
     sink.stdin.close()
-    sink.wait()
+    if sink.wait() != 0:
+        raise RuntimeError("encoder failed")
     source.kill()
     (out_dir / "frames.json").write_text(json.dumps(log, ensure_ascii=False), encoding="utf-8")
     print("wrote", out)

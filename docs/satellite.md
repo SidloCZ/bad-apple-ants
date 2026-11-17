@@ -1,6 +1,6 @@
 # Satellite edition
 
-[日本語](satellite.ja.md)
+**English** | [日本語](satellite.ja.md)
 
 This part of the repository made "Bad Apple!! but every frame is a real place on Earth (Satellite Imagery)"
 (YouTube `nw02Enk8o1I`, 2560x1920, 30p, AV1) and its land & water + OpenStreetMap edition (YouTube `kB3fzm_Un2g`).
@@ -138,7 +138,8 @@ over the 1444x1076 picture area went from 0.8070 (previous views, re-measured) t
   stage had left without a photo; 91 kept their view and one (frame 5185) used a saved alternative view.
 - From `fullres` on, a Sentinel-2 photo with at least 95 % real coverage can have its missing pixels filled with
   same-coordinate Landsat pixels (labelled S2+LANDSAT); the `fullres` result also used official ESA WorldCover Sentinel-2
-  annual RGB composites for 26 frames (none of them remains in the published video).
+  annual RGB composites for 26 frames (none of them remains in the published video, and the code that fetched them
+  is not included, so a rerun of `fullres` gives other photos for those frames).
   [`retry_native_primary.py`](../badapple_coastline/retry_native_primary.py) retries
   the best candidate once when its photo failed at first.
 - No pixel is invented: a photo is used only if real pixels cover every output pixel; missing areas are never painted.

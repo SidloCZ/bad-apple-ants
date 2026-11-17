@@ -6,10 +6,10 @@ Layout (2560x1920, 30p, AV1 10-bit):
   main land/water 1920x1440 at (40,140); right column 520 px wide:
   original silhouette, satellite photo (same view), world map, OpenStreetMap.
 Every panel is drawn at output size from lossless sources and encoded once.
-Frames are composed by worker processes into a shared-memory ring; the main
-process adds the decoded original animation and feeds av1_nvenc.
+Frames are composed by a thread pool; the main thread adds the decoded original
+animation and feeds av1_nvenc.
 
-See LANDWATER-OSM.md for decisions, data sources and verification.
+See docs/satellite.md (land & water edition) for decisions, data sources and verification.
 """
 
 from __future__ import annotations
@@ -18,21 +18,20 @@ from functools import lru_cache
 from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
-from badapple_media import ffmpeg_binary, probe
+from badapple_media import ffmpeg_binary
 from .data import digest
 from .pipeline import read_records, write_json
 from .flash_reduction import (
     SOURCE,
     CREDIT_START,
     CREDIT_PHOTO,
-    LOGO_START,
     fill_frame,
     audit,
     audio_command,
     packet_hash,
 )
 from .footprint_map import footprint, LAND as NE_LAND
-from .native_2560 import clipped, WorldMap, capture_dates, source_label, NAVY, ACCENT, MUTED, RULE, HISTORY_SOFT
+from .native_2560 import clipped, WorldMap, capture_dates, source_label, NAVY, ACCENT, MUTED, RULE
 from .native_2560 import font as _shared_font
 import threading
 
@@ -534,8 +533,7 @@ def prepare(output=OUTPUT, cache=CACHE, shards=6):
     if not geo_path.is_file():
         from .geostats import build
 
-        geo_path.write_text(json.dumps(build(records, CREDIT_START, 24), ensure_ascii=False), encoding="utf-8")
-    geo = json.loads(geo_path.read_text(encoding="utf-8"))
+        geo_path.write_text(json.dumps(build(records, CREDIT_START), ensure_ascii=False), encoding="utf-8")
     views, names = osm_maps.build_views(shown, OSM_SIZE)
     (output / "osm-views.json").write_text(
         json.dumps(
@@ -832,8 +830,8 @@ def original_command(count):
 
 def encode(output, cache, count, bitrate=45, workers=12, lookahead=48):
     """Compose frames with a thread pool (PNG decode, resizing and NumPy release the
-    GIL; ~19 fps with 12 threads). Worker processes were abandoned: on this machine
-    their multiprocessing queue handles became invalid intermittently (WinError 6)."""
+    GIL; ~19 fps with 12 threads). Threads rather than processes: on Windows the
+    multiprocessing queue handles of worker processes became invalid intermittently (WinError 6)."""
     from concurrent.futures import ThreadPoolExecutor
 
     output = Path(output)
@@ -962,11 +960,15 @@ def credits_text(output, records, count, geo):
         .read_text(encoding="utf-8")
         .splitlines()
     )
-    keep = [l for l in source if not l.startswith(("Native2560x1920/30p AV1 edition", "LOCAL map:"))]
+    keep = [
+        l
+        for l in source
+        if not l.startswith(("Native2560x1920/30p AV1 edition", "Native 2560x1920/30p AV1 edition", "LOCAL map:"))
+    ]
     s = geo["stats"]
     keep += [
         "Land/water edition: the main picture is the matched land/water view (white = land, dark = water), sampled directly from the lossless 0.3 arc-second Kindermann mask at the 1920x1440 display size through the same affine view (rotation and reflection) as the match. Zoomed-out views use up to 4x4 area supersampling; zoomed-in views use a Gaussian-weighted (sigma 0.55 cell) contour of the 10 m grid with a one-pixel anti-aliasing ramp. Nearest-neighbour sampling of the same transform reproduces every saved native mask exactly.",
-        "OpenStreetMap panel: Map data (c) OpenStreetMap contributors, available under the Open Database License (ODbL), https://www.openstreetmap.org/copyright . Vector tiles: Protomaps planet build 2026-11-09 (https://build.protomaps.com/20261109.pmtiles; ODbL produced work), read by HTTP range requests. Style: @protomaps/basemaps 5.7.2 (BSD-3-Clause), recoloured; fonts Noto Sans (SIL OFL) and sprites from protomaps/basemaps-assets. Rendered with MapLibre GL JS 5.24.0 (BSD-3-Clause). North-up Web Mercator; gold = displayed photograph footprint, cyan = earlier nearby views.",
+        f"OpenStreetMap panel: Map data (c) OpenStreetMap contributors, available under the Open Database License (ODbL), https://www.openstreetmap.org/copyright . Vector tiles: Protomaps planet build {Path(osm_maps.PMTILES).stem} ({osm_maps.PMTILES}; ODbL produced work), read by HTTP range requests. Style: @protomaps/basemaps 5.7.2 (BSD-3-Clause), recoloured; fonts Noto Sans (SIL OFL) and sprites from protomaps/basemaps-assets. Rendered with MapLibre GL JS 5.24.0 (BSD-3-Clause). North-up Web Mercator; gold = displayed photograph footprint, cyan = earlier nearby views.",
         'Country / continent statistics: Natural Earth 1:10m Admin 0 map units, disputed areas and marine areas (public domain), "Made with Natural Earth". Country = largest geodesic land overlap of each view (de facto boundaries; no position on sovereignty implied); views with < 2 % land use the nearest country within 200 nautical miles, otherwise "Open ocean". Russia split at the Urals (60 E). A place joins views overlapping with IoU > 0.5.',
         f"Statistics card (ending credits, frames {CREDIT_START + 1}-{count}): {s['matched_frames']} matched frames, {s['views']} distinct views, {s['places']} places, {s['countries']} countries and territories, {s['continents']} continents. Per-frame list: frames.csv.",
         "Satellite photo panel: the same photographs, resized to 520x390 and tone-mapped per frame into a relative-luminance window of 0.09 (below the 0.1 WCAG general-flash step), no temporal blending.",
@@ -992,7 +994,7 @@ def finalize(output=OUTPUT, cache=CACHE):
     )
     write_json(output / "flash-audit.json", flash)
     write_json(output / "status.json", dict(phase="audio-mux"))
-    subprocess.run(audio_command(video, original, final, count, "unicode"), check=True)
+    subprocess.run(audio_command(video, original, final, count, "trim"), check=True)
     if packet_hash(final, "v") != packet_hash(video, "v"):
         raise ValueError("Video packets changed during audio mux")
     subprocess.run(
@@ -1090,13 +1092,15 @@ if __name__ == "__main__":
     if args.command == "prepare":
         print(prepare(args.output, args.cache, args.shards))
     elif args.command == "stills":
+        if not args.frames:
+            parser.error("stills needs --frames, e.g. --frames 0,1200,6600")
         stills(args.frames, args.output, args.cache)
     elif args.command == "finalize":
-        print(json.dumps(finalize(args.output, args.cache), indent=1, default=str)[:3000])
+        print(json.dumps(finalize(args.output, args.cache), indent=1, default=str))
     else:
         n = args.max_frames or len(read_records(SOURCE / "frames.jsonl"))
         path, result = encode(args.output, args.cache, n, args.bitrate, args.workers)
         write_json(args.output / "encode.json", result)
         print(result)
         if args.command == "all" and n == len(read_records(SOURCE / "frames.jsonl")):
-            print(json.dumps(finalize(args.output, args.cache), indent=1, default=str)[:3000])
+            print(json.dumps(finalize(args.output, args.cache), indent=1, default=str))

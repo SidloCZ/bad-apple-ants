@@ -9,16 +9,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from .atlas import corners, view_transform
-from .cuda_search import BASELINE, OUTPUT, KEYS
-from .data import digest, request_json, MASK_CREDIT
-from .landsat import read_bands, STAC
+from .cuda_search import OUTPUT, KEYS
+from .data import digest
 from .pipeline import read_records, write_json
 from .quality import image_quality, file_quality, POLICY
 from .satellite import nearest_place, project_asset, catalog as earth_catalog, resolve_interval, STAC as S2_STAC
 
 SIZE = (1444, 1080)
 COLLECTION = "sentinel-2-l2a"
-INTERVAL = "2019-01-01T00:00:00Z/2021-12-31T23:59:59Z"
 
 
 def residual_is_safe(covered, snow, water, critical):
@@ -48,62 +46,6 @@ def coast_regions(record):
     critical = water | maximum_filter(edge, size=2 * radius + 1)
     return water, critical
 
-
-def catalog(record, transform, cache, interval=INTERVAL):
-    points = np.asarray(corners(transform, SIZE))
-    bounds = [*points.min(axis=0), *points.max(axis=0)]
-    if bounds[0] < -180 or bounds[2] > 180:
-        raise ValueError("Antimeridian imagery window")
-    snapped = [float(np.floor(v * 2) / 2) for v in bounds[:2]] + [float(np.ceil(v * 2) / 2) for v in bounds[2:]]
-    payload = dict(
-        collections=[COLLECTION],
-        bbox=snapped,
-        datetime=interval,
-        limit=200,
-        query={"eo:cloud_cover": {"lt": 30}},
-        fields={
-            "include": [
-                "id",
-                "collection",
-                "geometry",
-                "properties.datetime",
-                "properties.eo:cloud_cover",
-                "assets.visual",
-                "assets.SCL",
-                "links",
-            ]
-        },
-    )
-    key = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:24]
-    directory = cache / "catalogs"
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{key}.json"
-    if path.is_file():
-        return json.loads(path.read_text())
-    result = request_json(STAC + "/search", payload)
-    items = result.get("features", [])
-    for _ in range(3):
-        link = next((l for l in result.get("links", []) if l.get("rel") == "next"), None)
-        if not link:
-            break
-        if not link["href"].startswith(STAC + "/"):
-            raise ValueError("Unexpected pagination host")
-        result = request_json(link["href"], link.get("body") if link.get("method") == "POST" else None)
-        items += result.get("features", [])
-    compact = [
-        dict(
-            id=i["id"],
-            collection=i["collection"],
-            geometry=i["geometry"],
-            properties={k: i["properties"][k] for k in ["datetime", "eo:cloud_cover"] if k in i["properties"]},
-            assets={k: {"href": i["assets"][k]["href"]} for k in ["visual", "SCL"]},
-        )
-        for i in items
-    ]
-    temporary = path.with_name(path.name + f".{os.getpid()}.partial")
-    temporary.write_text(json.dumps(compact))
-    temporary.replace(path)
-    return compact
 
 
 def sentinel(record, cache, max_scenes=12, preferred_dates=()):
@@ -561,15 +503,10 @@ def retrieve(output=OUTPUT, workers=16, follow=False):
 
 
 def trim_cache(root, budget=24 * 1024**3):
-    """Only evict regenerable raw crop caches from this new output directory."""
+    """Only evict regenerable raw crop caches (native-crops, native-patches) under this imagery directory."""
     root = Path(root).resolve()
-    workspace = Path(__file__).resolve().parents[1]
-    allowed = {
-        (workspace / "output" / name / "imagery").resolve()
-        for name in ["coastline-fullres-cuda-v2", "coastline-precision-v3", "coastline-precision-v4"]
-    }
-    if root not in allowed:
-        raise ValueError("Unexpected raw cache root")
+    if root.name != "imagery":
+        raise ValueError(f"Unexpected raw cache root {root}: expected an <output>/imagery directory")
     entries = []
     for name in ["native-crops", "native-patches"]:
         directory = (root / name).resolve()

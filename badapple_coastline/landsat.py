@@ -52,7 +52,6 @@ def read_bands(
     item, transform, size, assets, resampling, cache, collection=COLLECTION, dtype="uint16", expected_count=None
 ):
     """PC's official raw GeoTIFF crop avoids many transcontinental COG ranges."""
-    import rasterio
     from rasterio.io import MemoryFile
     from rasterio.warp import reproject
 
@@ -213,84 +212,6 @@ def read_native_crop(item, transform, size, assets, resampling, cache, collectio
         temporary.replace(path)
     return dest
 
-
-def read_native_patches(item, transform, size, assets, resampling, cache, collection, dtype, expected_count=None):
-    """Share sensor-resolution geographic patches; never use a reduced whole scene."""
-    from rasterio.io import MemoryFile
-    from rasterio.warp import reproject
-
-    cache.mkdir(parents=True, exist_ok=True)
-    count = expected_count or len(assets)
-    points = np.asarray(corners(transform, size))
-    bounds = [*points.min(axis=0), *points.max(axis=0)]
-    latitude = (transform @ (size[0] / 2, size[1] / 2))[1]
-    requested = 111320 * np.hypot(transform.a * np.cos(np.deg2rad(latitude)), transform.d)
-    sensor = 30 if collection == COLLECTION else 20 if assets == ("SCL",) else 10
-    resolution = sensor * 2 ** max(0, math.floor(math.log2(max(sensor, requested) / sensor)))
-    # The level is never coarser than either the sensor or the requested pixels.
-    step = resolution * 2048 / 111320
-    dest = np.zeros((count, size[1], size[0]), dtype)
-    first = math.floor((bounds[1] + 90) / step)
-    last = math.floor((bounds[3] + 90) / step)
-    if bounds[0] < -180 or bounds[2] > 180:
-        raise ValueError("Antimeridian patch unsupported")
-    for row in range(first, last + 1):
-        bottom = max(-90.0, -90 + row * step)
-        top = min(90.0, -90 + (row + 1) * step)
-        coslat = max(0.01, np.cos(np.deg2rad((bottom + top) / 2)))
-        columns = max(1, math.ceil(360 * coslat / step))
-        dx = 360 / columns
-        for col in range(
-            max(0, math.floor((bounds[0] + 180) / dx)), min(columns - 1, math.floor((bounds[2] + 180) / dx)) + 1
-        ):
-            left = -180 + col * dx
-            right = -180 + (col + 1) * dx
-            width = max(1, math.ceil((right - left) * 111320 * coslat / resolution))
-            height = max(1, math.ceil((top - bottom) * 111320 / resolution))
-            params = [
-                ("collection", collection),
-                ("item", item["id"]),
-                ("dst_crs", "EPSG:4326"),
-                ("coord_crs", "EPSG:4326"),
-                ("asset_as_band", "false" if count != len(assets) else "true"),
-                ("unscale", "false"),
-                ("return_mask", "false"),
-                ("resampling", resampling.name),
-                ("reproject", resampling.name),
-            ] + [("assets", a) for a in assets]
-            url = (
-                "https://planetarycomputer.microsoft.com/api/data/v1/item/bbox/"
-                + ",".join(map(str, [left, bottom, right, top]))
-                + f"/{width}x{height}.tif?"
-                + urlencode(params)
-            )
-            key = hashlib.sha256(url.encode()).hexdigest()[:24]
-            path = cache / f"{key}.tif"
-            if path.is_file():
-                raw = path.read_bytes()
-            else:
-                raw = request_crop(url)
-            with MemoryFile(raw) as memory, memory.open() as source:
-                if source.count != count or any(t != dtype for t in source.dtypes) or not source.crs:
-                    raise ValueError("Native patch band/type/georeference mismatch")
-                reproject(
-                    source=source.read(),
-                    destination=dest,
-                    src_transform=source.transform,
-                    src_crs=source.crs,
-                    dst_transform=transform,
-                    dst_crs="EPSG:4326",
-                    src_nodata=0,
-                    dst_nodata=0,
-                    resampling=resampling,
-                    num_threads=1,
-                    init_dest_nodata=False,
-                )
-            if not path.is_file():
-                temporary = path.with_name(path.name + f".{os.getpid()}.partial")
-                temporary.write_bytes(raw)
-                temporary.replace(path)
-    return dest
 
 
 def natural_color(dn):

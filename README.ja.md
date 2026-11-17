@@ -17,7 +17,7 @@
 ## しくみ
 
 **地球**：Kindermann（2025）の 10 m 全球陸海マスクから、各フレームのシルエットと陸と水の形が一致する範囲を探します。
-位置は全球、幅は約 2〜1,000 km、回転は任意で、左右反転も許します。Rust/Rayon と CUDA で数十億の候補を元の 10 m 画素で
+位置は全球、幅は 2〜1,024 km で探索し（調整で約 0.7 km まで）、回転は任意で、左右反転も許します。Rust/Rayon と CUDA で数十億の候補を元の 10 m 画素で
 評価し（バランス平均 IoU に輪郭・境界の一致を加えた指標）、最良の範囲について Sentinel-2 L2A の撮影シーンを公開クラウドから
 読み込み、雲・雪・白飛びを検査します。Sentinel-2 で覆えない範囲は Landsat 8/9 で補います。2560×1920 の動画には、写真・元フレーム・
 一致したマスク・それまでの全範囲の世界地図・周辺図を表示します。詳細は [docs/satellite.ja.md](docs/satellite.ja.md)。
@@ -50,7 +50,8 @@
 ```powershell
 .\setup.ps1                                     # 3 つの Python パッケージを入れた .venv を作成
 .venv\Scripts\python -m badapple_media fetch    # 元動画とフォント（コミット固定・SHA-256 検査）
-.venv\Scripts\python -m pytest                  # 92 件のテスト。ダウンロードも GPU も不要
+.venv\Scripts\python -m pytest                  # 91 件のテスト。ダウンロードも GPU も不要（Rust の照合器を
+                                                #   ビルドし Natural Earth を取得するまで 2 件はスキップ）
 ```
 
 各工程は `output/` の下に自分のフォルダーを作り、中断した所から再開します。
@@ -76,7 +77,7 @@
 | `site` | `output/landwater-site/web` | 場所マップのサイト用データ |
 
 完全な再現には限界があります。衛星画像のアーカイブや地図のビルドは更新され、precision 探索の入力の一部は以前の実行に由来します。
-[docs/satellite.ja.md](docs/satellite.ja.md) に詳しく書いています。
+[docs/satellite.ja.md](docs/satellite.ja.md#再現性について) に詳しく書いています。
 
 ## 構成
 

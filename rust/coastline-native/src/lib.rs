@@ -248,7 +248,8 @@ pub unsafe extern "C" fn coastline_native_render_coverage(
         || width == 0
         || height == 0
         || supersample > 16
-        || !(sigma > 0.0)
+        || sigma.is_nan()
+        || sigma <= 0.0
     {
         return -1;
     }

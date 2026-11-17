@@ -144,12 +144,7 @@ def ingest_global(output: Path) -> None:
                 values = np.asarray(data, dtype=np.float32)
                 valid = ~np.ma.getmaskarray(data) & (values != 0)
             else:
-                # The TC orthomosaic also marks gaps with -32767 besides its declared nodata, so
-                # average manually and keep only blocks whose pixels are all positive.
-                full = src.read(1)[: shape[0] * factor, : shape[1] * factor].astype(np.float32)
-                blocks = full.reshape(shape[0], factor, shape[1], factor)
-                values = blocks.mean(axis=(1, 3))
-                valid = (blocks > 0).all(axis=(1, 3))
+                raise ValueError(f"{path}: expected an 8-bit mosaic, got {src.dtypes[0]}")
         valid = erode(valid)
         low, high = np.percentile(values[valid], [1, 99])
         base = stretch_u8(values, valid, float(low), float(high))

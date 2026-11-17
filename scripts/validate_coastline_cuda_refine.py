@@ -1,4 +1,4 @@
-import ctypes, json, struct, time
+import json, struct, time
 from pathlib import Path
 import numpy as np
 from scipy.signal import correlate2d
@@ -13,6 +13,7 @@ for row in mask:
     rows.append(transitions)
 offsets = np.r_[0, np.cumsum([len(r) for r in rows])].astype("<u8")
 path = Path(".tmp/cuda-test-native.rle").resolve()
+path.parent.mkdir(exist_ok=True)
 path.write_bytes(b"LWMRLE01" + struct.pack("<II", 64, 64) + offsets.tobytes() + b"".join(r.tobytes() for r in rows))
 
 with CudaAtlas(load_globe=False) as cuda:
@@ -88,6 +89,7 @@ with CudaAtlas(load_globe=False) as cuda:
         expected = [scene.sum(), np.sum(scene & query), 0, se.sum(), qe.sum(), np.sum(se & qd), np.sum(qe & sd)]
         assert np.array_equal(metrics["counts"][i], expected), (metrics["counts"][i], expected)
     print("Full 1444x1080 exact land/water/boundary integer counts match CPU reference", elapsed, flush=True)
+    Path("output").mkdir(exist_ok=True)
     Path("output/coastline-cuda-refinement-validation.json").write_text(
         json.dumps(
             dict(

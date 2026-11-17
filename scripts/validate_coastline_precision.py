@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import distance_transform_cdt
 from scipy.signal import correlate2d
-from badapple_coastline.cuda_backend import CudaAtlas, shape_metrics_from_counts
+from badapple_coastline.cuda_backend import CudaAtlas
 from badapple_coastline.precision_config import contour_features
 from badapple_coastline.precision_search import FrameScoreCache, score_batches
 
@@ -99,7 +99,7 @@ with CudaAtlas(load_globe=False) as cuda:
         np.testing.assert_array_equal(cached[name], reference[name][repeated])
     assert len(cache.rows) == len(views)
     print(
-        "Full-resolution frame score reuse preserves all13 integer counts and every metric, including reordered/repeated normal/mirrored views",
+        "Full-resolution frame score reuse preserves all 13 integer counts and every metric, including reordered/repeated normal/mirrored views",
         flush=True,
     )
     w, h, mx, my = 40, 32, 7, 5
@@ -156,10 +156,11 @@ with CudaAtlas(load_globe=False) as cuda:
             "GPU-resident area/contour descriptors and both regional rankings match CPU descriptor construction exactly",
             flush=True,
         )
+    Path("output").mkdir(exist_ok=True)
     Path("output/coastline-precision-cuda-validation.json").write_text(
         json.dumps(
             dict(
-                exact_reference="scipy.ndimage.distance_transform_cdt taxicab, clipped to256; integer exponent weights",
+                exact_reference="scipy.ndimage.distance_transform_cdt taxicab, clipped to 256; integer exponent weights",
                 sizes=[[64, 48], [512, 384], [1444, 1080]],
                 integer_count_differences=0,
                 mirrored_pixel_differences=0,

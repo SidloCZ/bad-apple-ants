@@ -1,6 +1,6 @@
 """Decode every original frame at full size (1444x1080) into binary targets and 64x48 query features."""
 
-import hashlib, json, subprocess, time
+import hashlib, json, subprocess
 from pathlib import Path
 import numpy as np
 from PIL import Image
@@ -58,7 +58,7 @@ if not (root / "frames.json").is_file():
         ),
         encoding="utf-8",
     )
-meta = json.loads((root / "frames.json").read_text())
+meta = json.loads((root / "frames.json").read_text(encoding="utf-8"))
 n = meta["count"]
 if not (root / "targets.bits").is_file():
     targets = np.memmap(root / "frames.u8", mode="r", dtype=np.uint8, shape=(n, h, w))

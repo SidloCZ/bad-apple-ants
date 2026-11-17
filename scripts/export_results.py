@@ -9,8 +9,8 @@ Reads the outputs of a finished run:
 and writes
   results/satellite/frames.csv   one row per frame: view, score, photo scenes and dates, place
   results/moon/frames.csv        one row per frame: image, pose, NCC, feature, Sun
-  results/moon/matches.json      the chosen pose of every distinct frame, usable directly by
-                                 `python -m badapple_moon crops --matches results/moon/matches.json`
+  results/moon/matches.json      the chosen pose of every distinct frame; copy it to output/moon/matches.json
+                                 and run `python -m badapple_moon crops` (docs/moon.md)
   results/moon/rasters.txt       the Kaguya TC images those poses use (for `ingest-tc --ids`)
 """
 

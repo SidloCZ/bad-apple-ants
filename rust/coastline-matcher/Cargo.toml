@@ -2,7 +2,11 @@
 name = "coastline-matcher"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Shape matcher: Bad Apple!! silhouettes against Earth's land/water mask"
 license = "MIT"
+repository = "https://github.com/ikuto32/bad-apple-earth-moon"
+publish = false
 
 [lib]
 name = "coastline_matcher"

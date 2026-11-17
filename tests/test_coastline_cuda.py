@@ -1,6 +1,5 @@
 """Metric and real-photo geometry contracts, independent of installed GPU hardware."""
 
-from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image

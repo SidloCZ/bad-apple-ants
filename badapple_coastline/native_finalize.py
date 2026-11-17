@@ -42,11 +42,11 @@ def credits(output, records):
         text += "https://registry.opendata.aws/esa-worldcover-vito-composites/\nhttps://docs.terrascope.be/Developers/WebServices/OGC/MapProxy.html\n"
     text += "All pictures retain one geographic field of view. Rigid cropping, scaling, rotation, reprojection and same-location temporal mosaics; no invented geography or synthetic pixel fill. Retained baseline photos are geographically recropped to the original video aspect.\n"
     text += "Exact source scene/product identifiers, acquisition dates or annual periods, source URLs, geographic footprints, image hashes and processing are recorded in frames.jsonl. Parent-image cloud estimates are not displayed as exact cropped-view statistics. Annual residual cloud fractions are unavailable and displayed as n/a.\n"
-    text += "Original mask sampled directly from its lossless 0.3 arcsecond data; source resolution1444x1080, without spatial downscaling. "
+    text += "Original mask sampled directly from its lossless 0.3 arcsecond data; source resolution 1444x1080, without spatial downscaling. "
     if "structure_objective" in settings:
-        text += "Matching excludes fixed top/bottom2pixel source-video letterbox rows, using all1444x1076 true-content pixels at their original coordinates. Area, contours and content-frame border agreement are measured; descriptor/FFT padding extends the nearest content row only. Original frames and all native geography pixels remain intact. Baseline and new views use this same content metric; historical full-frame scores are not directly comparable. "
+        text += "Matching excludes fixed top/bottom 2-pixel source-video letterbox rows, using all 1444x1076 true-content pixels at their original coordinates. Area, contours and content-frame border agreement are measured; descriptor/FFT padding extends the nearest content row only. Original frames and all native geography pixels remain intact. Baseline and new views use this same content metric; historical full-frame scores are not directly comparable. "
     else:
-        text += "Final targets and mask scores use all original1444x1080 pixels. "
+        text += "Final targets and mask scores use all original 1444x1080 pixels. "
     text += "Finite sampled global search, not a continuous global optimum. White=land, black=water, including lakes and rivers.\n"
     text += f"Horizontal reflections: {sum(bool(r.get('mirror_horizontal')) for r in records)} frames. Reflected views are marked MIRRORED VIEW; orientation is recorded per frame. Photographs and native masks use the same reflected geographic view.\n"
     text += "Place names: Natural Earth (public domain), https://www.naturalearthdata.com/about/terms-of-use/ . Labels identify the nearest mapped settlement and distance, not an asserted exact locality.\n"

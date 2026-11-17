@@ -2,7 +2,11 @@
 name = "coastline-native"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Lossless 10 m land/water run-length cache and sampler"
 license = "MIT"
+repository = "https://github.com/ikuto32/bad-apple-earth-moon"
+publish = false
 
 [lib]
 name = "coastline_native"

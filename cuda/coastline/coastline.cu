@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -141,12 +142,17 @@ API void* coast_cuda_create(){try{auto* c=new Context();last_error.clear();retur
 API void coast_cuda_destroy(void* handle){delete static_cast<Context*>(handle);}
 API int coast_cuda_add_tile(void* handle,int index,const char* path,double left,double bottom,double right,double top){return guarded([&]{
     if(!handle||index<0||index>=72)throw std::runtime_error("Invalid native tile slot");auto& c=*static_cast<Context*>(handle);
-    std::ifstream input(path,std::ios::binary|std::ios::ate);if(!input)throw std::runtime_error("Cannot open native RLE tile");
-    const auto size=size_t(input.tellg());input.seekg(0);std::vector<uint8_t> bytes(size);input.read((char*)bytes.data(),size);
+    // UTF-8 path from Python; u8path keeps non-ASCII folders working on Windows.
+    std::ifstream input(std::filesystem::u8path(path),std::ios::binary|std::ios::ate);if(!input)throw std::runtime_error("Cannot open native RLE tile");
+    const auto size=size_t(input.tellg());input.seekg(0);std::vector<uint8_t> bytes(size);
+    if(!input.read((char*)bytes.data(),size))throw std::runtime_error("Cannot read native RLE tile");
     if(size<16||std::string((char*)bytes.data(),8)!="LWMRLE01")throw std::runtime_error("Invalid native RLE header");
     uint32_t w,h;memcpy(&w,bytes.data()+8,4);memcpy(&h,bytes.data()+12,4);const size_t data_start=16+8*(size_t(h)+1);
     if(!w||!h||size<data_start)throw std::runtime_error("Truncated native RLE row index");
     uint64_t last;memcpy(&last,bytes.data()+16+size_t(h)*8,8);if(data_start+last*4!=size)throw std::runtime_error("Truncated native RLE transitions");
+    // The device binary-searches each row's transitions, so the row offsets must be sane.
+    uint64_t previous=0;for(size_t row=0;row<=h;++row){uint64_t offset;memcpy(&offset,bytes.data()+16+row*8,8);
+        if(offset<previous||offset>last)throw std::runtime_error("Corrupt native RLE row index");previous=offset;}
     uint8_t* ptr=nullptr;check(cudaMalloc((void**)&ptr,size));check(cudaMemcpy(ptr,bytes.data(),size,cudaMemcpyHostToDevice));
     if(c.host_tiles[index].bytes)check(cudaFree((void*)c.host_tiles[index].bytes));
     c.host_tiles[index]={ptr,w,h,uint64_t(data_start),left,bottom,right,top};
@@ -369,6 +375,7 @@ __global__ void shape_count_kernel(const uint8_t* se,const uint8_t* qe,const uin
         if(sum)atomicAdd(counts+size_t(view)*6+threadIdx.x,(unsigned long long)sum);}
 }
 static int shape_impl(void* handle,const double* geometry,int n,const uint8_t* query,int w,int h,double aspect,int tolerance,unsigned long long* output,const int* mirrors=nullptr,int border_y=0){
+    if(n<1){last_error="Invalid view count";return -1;}
     std::vector<unsigned long long> base(size_t(n)*7);
     int status=score_impl(handle,geometry,n,query,w,h,aspect,tolerance,base.data(),mirrors,border_y);if(status)return status;
     return guarded([&]{
@@ -407,7 +414,7 @@ __global__ void content_border_kernel(const uint8_t* masks,const uint8_t* query,
         if(sum)atomicAdd(counts+size_t(view)*4+side,(unsigned long long)sum);}
 }
 API int coast_cuda_score_structure(void* handle,const double* geometry,const int* mirrors,int n,const uint8_t* query,int w,int h,double aspect,int tolerance,int border_y,unsigned long long* output){
-    if(n<1)return -1;
+    if(n<1){last_error="Invalid view count";return -1;}
     std::vector<unsigned long long> base(size_t(n)*13);
     const int status=shape_impl(handle,geometry,n,query,w,h,aspect,tolerance,base.data(),mirrors,border_y);if(status)return status;
     return guarded([&]{auto& c=*static_cast<Context*>(handle);c.border_counts.allocate(size_t(n)*4);

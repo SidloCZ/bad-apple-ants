@@ -27,13 +27,13 @@ in sync), AV1 10-bit via NVENC, with the original audio. The surface fills a 4:3
 
 | | |
 | --- | --- |
-| Images searched | Kaguya TC ingested at ≤ 95 m/px: 30,498 single images + 208,729 stereo images (of 220,660; 9,688 flat and 2,243 low-signal images excluded), plus the WAC mosaic |
+| Images ingested | Kaguya TC at ≤ 95 m/px: 30,498 single images + 208,729 stereo images (of 220,660 catalogued; 9,688 flat and 2,243 other images not ingested), plus the WAC mosaic; `qa-images` then keeps 3,378 of them out of the search (below) |
 | Candidate poses | 393 billion (16 rotations, 10 shards, RTX 4090, about 5.8 million poses/s, about 19 hours) |
 | Queries | 6,955 frames → 6,469 distinct; 6,460 textured × 2 (as-is and mirrored) = 12,920 |
 | NCC per frame (32×24) | median 0.896, 10th percentile 0.790, 90th percentile 0.957 |
 | Frames with NCC < 0.80 | 12.4 % |
 | View width (TC) | median 3.7 km, 10th percentile 2.3 km, minimum 1.9 km |
-| Sources used | TC 6,454 distinct frames (2,569 images; 4,028 from the stereo series), WAC 6, single-colour frames 9 |
+| Sources used | TC 6,454 distinct frames (2,569 images; 4,028 from the stereo series), WAC 6, single-colour frames 9 (one more TC image, so 2,570 in `rasters.txt`) |
 | CPU check | best match identical for 12,920/12,920 queries; largest score difference 5.5e-4 |
 
 ## Pipeline
@@ -67,8 +67,8 @@ Each TC image's geometry is a quadratic polynomial from the tangent plane at the
 full-resolution pixels, fitted through GDAL/PROJ (equirectangular and polar stereographic alike,
 residual ≤ 0.25 px). WAC uses the exact inverse orthographic projection, so no per-latitude correction is
 needed and the poles use the same code. Pixel values are stretched from each image's 1–99th percentile to
-1..255 with 0 as no-data. `qa-images` excludes observations whose 1–99th percentile range is under 250 DN
-(1,013 single and 2,365 stereo images): stretched, their weak signal shows detector seams, stripes and
+1..255 with 0 as no-data. `qa-images` keeps ingested observations whose 1–99th percentile range is under 250 DN
+out of the search (1,013 single and 2,365 stereo images): stretched, their weak signal shows detector seams, stripes and
 compression blocks.
 
 The Spectral Profiler support series (204,690 items) is not used: its strong onboard compression shows as

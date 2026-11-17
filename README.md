@@ -17,7 +17,7 @@ mirrored, and tone-mapped. The map of every Earth view is at
 ## How it works
 
 **Earth.** The 10 m global land/water mask of Kindermann (2025) is searched for views — any position,
-width from about 2 km to 1,000 km, any rotation, optionally mirrored — whose land/water pattern matches
+searched widths of 2 km to 1,024 km (refined down to about 0.7 km), any rotation, optionally mirrored — whose land/water pattern matches
 each frame's silhouette. Rust/Rayon and CUDA score billions of candidate views on the original 10 m pixels
 (balanced mean IoU plus contour and boundary agreement). For the winner, the Sentinel-2 L2A scenes of that
 exact view are read from public cloud archives and screened for clouds, snow and white-outs; Landsat 8/9
@@ -53,7 +53,8 @@ The per-frame results of the published videos are in [`results/`](results), as p
 ```powershell
 .\setup.ps1                                     # .venv with the three Python packages
 .venv\Scripts\python -m badapple_media fetch    # source video and fonts (pinned, SHA-256 checked)
-.venv\Scripts\python -m pytest                  # 92 tests, no downloads or GPU needed
+.venv\Scripts\python -m pytest                  # 91 tests, no downloads or GPU needed (2 skip until the
+                                                #   Rust matcher is built and Natural Earth is fetched)
 ```
 
 Then run an edition. Every stage writes its own directory under `output/` and resumes where it stopped.

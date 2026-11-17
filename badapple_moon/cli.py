@@ -6,6 +6,7 @@ from pathlib import Path
 WAC_URL = (
     "https://asc-pds-services.s3.us-west-2.amazonaws.com/mosaic/Lunar_LRO_LROC-WAC_Mosaic_global_100m_June2013.tif"
 )
+WAC_SHA256 = "87159ead1888ae31bb647e957ec60943022b707ec804cb5353a304575936fd55"  # 5,959,263,751 bytes
 
 
 def main(argv=None):
@@ -73,7 +74,7 @@ def main(argv=None):
     if args.command == "fetch-wac":
         from .download import download
 
-        download(WAC_URL, Path("assets/moon/raw/wac_100m.tif"))
+        download(WAC_URL, Path("assets/moon/raw/wac_100m.tif"), WAC_SHA256)
         return
     if args.command == "fetch-names":
         from .names import fetch_names

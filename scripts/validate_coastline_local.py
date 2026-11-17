@@ -3,7 +3,10 @@
 from pathlib import Path
 import json
 import numpy as np
-import faiss  # Load before GDAL on Windows, as in the repository test configuration.
+try:
+    import faiss  # noqa: F401  (optional; load before GDAL on Windows, as tests/conftest.py does)
+except ImportError:
+    pass
 import rasterio
 from badapple_coastline.local_map import NativePointSampler
 from badapple_coastline.pipeline import write_json

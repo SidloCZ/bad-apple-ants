@@ -47,7 +47,7 @@ class NativePointSampler:
         ]
         self.handle = self.dll.coastline_native_open(str(self.manifest).encode())
         if not self.handle:
-            raise ValueError("Cannot open verified native10m globe")
+            raise ValueError("Cannot open verified native 10 m globe")
 
     def sample(self, longitude, latitude):
         longitude = (np.asarray(longitude) + 180) % 360 - 180
@@ -91,7 +91,7 @@ def geometry(points, size=SIZE):
     x, y = transformer.transform(np.asarray(points)[:, 0], np.asarray(points)[:, 1])
     xy = np.column_stack([x, y]) / 1000
     width = GEOD.inv(*points[0], *points[1])[2] / 1000
-    # Five photograph widths, at least20km; leave margin even for polar distortion.
+    # Five photograph widths, at least 20 km; leave margin even for polar distortion.
     span = max(20.0, 5 * width, 4 * np.abs(xy[:, 0]).max(), 4 * np.abs(xy[:, 1]).max() * size[0] / size[1])
     return transformer, lon, lat, float(span)
 
@@ -296,10 +296,10 @@ def prepare(records, output, workers=4):
         original_box=list(ORIGINAL_BOX),
         footer_box=list(FOOTER_BOX),
         footer_source_box=[0, 800, 1280, 960],
-        footer_treatment="Complete original footer proportionally resized0.75x, placed only below the left photo; no cropping or overlap",
+        footer_treatment="Complete original footer proportionally resized 0.75x, placed only below the left photo; no cropping or overlap",
         projection="WGS84 azimuthal equidistant centred on actual photograph; north up; equal metric pixel scale",
-        native_source="G.E. Kindermann global land/water mask,0.3arcsec; lossless original pixels, nearest neighbour",
-        span_rule="At least five actual photograph widths and20km; polar extent can enlarge context",
+        native_source="G.E. Kindermann global land/water mask, 0.3 arcsec; lossless original pixels, nearest neighbour",
+        span_rule="At least five actual photograph widths and 20 km; polar extent can enlarge context",
         current="Gold true photograph footprint, not enlarged",
         history="All preceding unique nearby photo footprints, no future views or truncation",
         visited_counts=np.searchsorted(renderer.first, np.arange(len(records)), side="right").tolist(),

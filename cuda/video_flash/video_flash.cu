@@ -24,7 +24,7 @@ API void video_flash_destroy(void* handle){
     cudaFree(c->variation);cudaFree(c->deltas);cudaFree(c->red_ring);cudaFree(c->red_count);cudaFree(c->stats);cudaFree(c->shadow_stats);delete c;
 }
 API void* video_flash_create(int w,int h,int window,float rate){
-    if(w<1||h<1||window<1||window>120||rate<=0)return nullptr;
+    if(w<1||h<1||window<1||window>120||rate<=0){snprintf(error_message,256,"invalid size, window or rate");return nullptr;}
     auto c=new Context{};c->w=w;c->h=h;c->n=w*h;c->window=window;c->rate=rate;
     size_t n=c->n;float table[256];for(int i=0;i<256;i++){float v=i/255.f;table[i]=v<=.04045f?v/12.92f:powf((v+.055f)/1.055f,2.4f);}
     if(!ok(cudaMemcpyToSymbol(linear_lut,table,sizeof(table)))||
@@ -36,8 +36,9 @@ API void* video_flash_create(int w,int h,int window,float rate){
        !ok(cudaMalloc(&c->shadow_stats,sizeof(ShadowAudit)))){
         video_flash_destroy(c);return nullptr;
     }
-    cudaMemset(c->variation,0,n*sizeof(float));cudaMemset(c->deltas,0,n*window*sizeof(float));
-    cudaMemset(c->red_ring,0,n*(window+1));cudaMemset(c->red_count,0,n);return c;
+    if(!ok(cudaMemset(c->variation,0,n*sizeof(float)))||!ok(cudaMemset(c->deltas,0,n*window*sizeof(float)))||
+       !ok(cudaMemset(c->red_ring,0,n*(window+1)))||!ok(cudaMemset(c->red_count,0,n))){video_flash_destroy(c);return nullptr;}
+    return c;
 }
 __device__ unsigned char encode(float v){v=fminf(1.f,fmaxf(0.f,v));float x=v<=.0031308f?12.92f*v:1.055f*powf(v,1.f/2.4f)-.055f;return (unsigned char)__float2int_rn(255.f*x);}
 __global__ void histogram_frame(Context c){

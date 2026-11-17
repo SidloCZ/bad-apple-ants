@@ -1,6 +1,6 @@
 # 衛星写真版
 
-[English](satellite.md)
+[English](satellite.md) | **日本語**
 
 このリポジトリのこの部分は、「Bad Apple!! but every frame is a real place on Earth (Satellite Imagery)」
 （YouTube `nw02Enk8o1I`、2560×1920、30p、AV1）と、その「陸と水＋OpenStreetMap」版（YouTube `kB3fzm_Un2g`）を作ったコードです。
@@ -35,7 +35,7 @@ Bad Apple!!の影絵アニメの各フレームについて、陸と水の境界
 | `precision` | `output/coastline-precision-v4` | 輪郭を考慮したCUDA探索、鏡像、新しい写真 |
 | `edition` | `output/coastline-precision-v4-2560x1920-30p-native-av1` | 公開した動画 |
 | `landwater` | `output/landwater-osm` | 陸と水＋OpenStreetMap版 |
-| `site` | `output/landwater-site/web` | 地点マップのサイト用データ（`-Site` で出力先を変更） |
+| `site` | `output/landwater-site/web` | 場所マップのサイト用データ（`-Site` で出力先を変更） |
 
 どの探索も、決まった開始地点・幅・角度から局所的に詰める有限のサンプリング探索です。地球上のあらゆる画角の中で
 最良であることを保証するものではありません。
@@ -128,7 +128,7 @@ GPUが面積と符号付きの輪郭勾配の2系統で順位をつけ、それ�
   残っていた92フレームを置き換えました。91フレームは同じ画角のまま、1フレーム（5185）は保存済みの別画角です。
 - `fullres` 以降は、実画素で95 %以上を覆うSentinel-2写真の欠けた画素だけを、同じ座標のLandsat画素で補う場合が
   あります（S2+LANDSATと表示）。`fullres` の結果では、26フレームにESA WorldCoverの公式Sentinel-2年次RGB合成画像も
-  使いました（公開した動画には残っていません）。[`retry_native_primary.py`](../badapple_coastline/retry_native_primary.py) は、最初に写真が取れなかった
+  使いました（公開した動画には残っていません。取得したコードは含めていないので、`fullres` を再実行するとそれらのフレームの写真は変わります）。[`retry_native_primary.py`](../badapple_coastline/retry_native_primary.py) は、最初に写真が取れなかった
   第一候補を一度だけ再試行します。
 - 画素を想像で補うことはしません。出力の全画素を実画素が覆う写真だけを使い、欠けた部分を塗りつぶしません。
   描画の前に、全フレームのマスク・写真の範囲・画像のハッシュを再確認します。フレームごとの出典は `frames.jsonl` と

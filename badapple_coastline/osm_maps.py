@@ -95,6 +95,7 @@ def render(views, out, size, shards=6, port=8130, cache=CACHE, pmtiles=PMTILES, 
         encoding="utf-8",
     )
     logs = out.parent / "osm-server.log"
+    log_stream = open(logs, "w")
     server = subprocess.Popen(
         [
             "node",
@@ -110,7 +111,7 @@ def render(views, out, size, shards=6, port=8130, cache=CACHE, pmtiles=PMTILES, 
             "--out",
             str(out),
         ],
-        stdout=open(logs, "w"),
+        stdout=log_stream,
         stderr=subprocess.STDOUT,
     )
     browsers = []
@@ -175,6 +176,8 @@ def render(views, out, size, shards=6, port=8130, cache=CACHE, pmtiles=PMTILES, 
                 b.kill()
         if server.poll() is None:
             server.kill()
+        server.wait()
+        log_stream.close()
 
 
 class OsmPanels:

@@ -20,7 +20,7 @@ from .pipeline import read_records, write_json
 from .flash_cuda import FlashCuda
 from .flash_reduction import SOURCE, CREDIT_START, CREDIT_PHOTO, fill_frame, audit, finish_audio
 from .footprint_map import FootprintHistory, footprint, polygons, SCALE, CURRENT
-from .local_map import LocalMaps, NativePointSampler, geometry, map_xy, dense_boundary, GOLD
+from .local_map import LocalMaps, map_xy, dense_boundary, GOLD
 
 OUTPUT = Path("output/coastline-precision-v4-2560x1920-30p-native-av1")
 WIDTH, HEIGHT = 2560, 1920
@@ -55,7 +55,7 @@ def clipped(draw, xy, text, width, face, fill):
 
 
 class WorldMap(FootprintHistory):
-    """Same persistent history, drawn natively and less densely than the1280 edition."""
+    """Same persistent history, drawn natively and less densely than the earlier 1280x960 edition."""
 
     def __init__(self):
         super().__init__(size=(WORLD[2] - WORLD[0], WORLD[3] - WORLD[1]))
@@ -101,7 +101,7 @@ class WorldMap(FootprintHistory):
 
 
 class NativeLocalMaps(LocalMaps):
-    """LOCAL map sampled from the native10m mask directly at its display size."""
+    """LOCAL map sampled from the native 10 m mask directly at its display size."""
 
     def __init__(self, records, sampler=None):
         super().__init__(records, LOCAL_SIZE, sampler)
@@ -192,7 +192,7 @@ def prepare_local_maps(records, output, workers=8):
         box=list(LOCAL),
         visited_counts=visited,
         projection="WGS84 azimuthal equidistant centred on actual photograph; north up",
-        native_source="G.E. Kindermann global land/water mask,0.3arcsec; lossless original pixels, nearest neighbour, sampled at display size",
+        native_source="G.E. Kindermann global land/water mask, 0.3 arcsec; lossless original pixels, nearest neighbour, sampled at display size",
         history="All preceding unique nearby photo footprints, no future views or truncation",
         views=views,
         elapsed_seconds=time.perf_counter() - start,
@@ -580,8 +580,8 @@ def encode(source, records, output, count, span, attempt, bitrate):
         processing_seconds=time.perf_counter() - start,
         luminance_span=span,
         luminance_floor=0.002,
-        tone_curve="Current-frame-only black/white levels (0.5th/99.5th luminance percentile, black<=0.01, white>=0.06), gamma0.75, into [floor,floor+span]",
-        chroma="1.15x saturation within gamut; chroma gain<=1 for near-black sources, rising to3x above relative luminance0.01; saturated red limited",
+        tone_curve="Current-frame-only black/white levels (0.5th/99.5th luminance percentile, black<=0.01, white>=0.06), gamma 0.75, into [floor,floor+span]",
+        chroma="1.15x saturation within gamut; chroma gain<=1 for near-black sources, rising to 3x above relative luminance 0.01; saturated red limited",
         image_history_mixing=False,
         previous_frame_pixels_used=False,
         near_black_source_pixels_checked=shadow_pixels,
@@ -658,13 +658,13 @@ def provenance(source, output, records, count, result, report):
             line = f"Horizontal reflections: {mirrored} displayed frames. Reflected views are marked MIRRORED VIEW; orientation is recorded per frame. Photographs and native masks use the same reflected geographic view."
         lines.append(line)
     lines.append(
-        f"Native2560x1920/30p AV1 edition: all{count} source frames displayed once each. Every panel is drawn at output size; photographs are resampled once from their lossless1444x1080 sources, with no intermediate video. "
+        f"Native 2560x1920/30p AV1 edition: all {count} source frames displayed once each. Every panel is drawn at output size; photographs are resampled once from their lossless 1444x1080 sources, with no intermediate video. "
         "Photograph-only tone mapping uses the current frame's own black/white levels into a fixed narrow luminance window (flash reduction); no temporal image blending. "
         "Original-animation comparison is decoded from its source and resized only. Ending geographic view is fixed; scores n/a. "
         f'Flash screening covers the satellite panel only (passed={report["passed"]}); see flash-audit.json.'
     )
     lines.append(
-        "LOCAL map: G.E. Kindermann global land/water mask,0.3arcsec, DOI10.5281/zenodo.14899246, CC BY4.0; native10m pixels sampled with nearest neighbour in a north-up WGS84 azimuthal-equidistant projection. Gold=actual photograph footprint; cyan=all preceding nearby views."
+        "LOCAL map: G.E. Kindermann global land/water mask, 0.3 arcsec, DOI 10.5281/zenodo.14899246, CC BY 4.0; native 10 m pixels sampled with nearest neighbour in a north-up WGS84 azimuthal-equidistant projection. Gold=actual photograph footprint; cyan=all preceding nearby views."
     )
     (output / "CREDITS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return revised
@@ -709,7 +709,7 @@ def run(source=SOURCE, output=OUTPUT, max_frames=None, span=0.09, bitrate=45, as
             elapsed_seconds=time.perf_counter() - started,
         )
         write_json(output / "summary.json", summary)
-        finish_audio(source, output, "unicode", assets and count == len(records))
+        finish_audio(source, output, "trim", assets and count == len(records))
     except Exception as exc:
         write_json(output / "status.json", dict(phase="failed", error=str(exc), total=count))
         raise

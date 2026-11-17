@@ -12,12 +12,16 @@ use std::{
 };
 
 type Open = unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_void;
+#[cfg(windows)]
+type OpenW = unsafe extern "C" fn(*const u16, *const c_char) -> *mut c_void;
 type Close = unsafe extern "C" fn(*mut c_void);
 type Read = unsafe extern "C" fn(*mut c_void, u32, *mut c_void, isize) -> isize;
 type Get = unsafe extern "C" fn(*mut c_void, u32, ...) -> i32;
 struct TiffApi {
     _lib: Library,
     open: Open,
+    #[cfg(windows)]
+    open_w: Option<OpenW>,
     close: Close,
     read: Read,
     get: Get,
@@ -28,12 +32,28 @@ impl TiffApi {
         unsafe {
             Ok(Self {
                 open: *lib.get(b"TIFFOpen\0")?,
+                #[cfg(windows)]
+                open_w: lib.get(b"TIFFOpenW\0").ok().map(|f| *f),
                 close: *lib.get(b"TIFFClose\0")?,
                 read: *lib.get(b"TIFFReadEncodedStrip\0")?,
                 get: *lib.get(b"TIFFGetFieldDefaulted\0")?,
                 _lib: lib,
             })
         }
+    }
+}
+impl TiffApi {
+    /// Opens a TIFF read-only; on Windows through the wide-character API so that
+    /// non-ASCII folders work (the narrow API uses the ANSI code page).
+    fn open_path(&self, path: &Path) -> Result<*mut c_void> {
+        #[cfg(windows)]
+        if let Some(open_w) = self.open_w {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            return Ok(unsafe { open_w(wide.as_ptr(), c"r".as_ptr()) });
+        }
+        let name = CString::new(path.to_str().context("Non UTF-8 TIFF path")?)?;
+        Ok(unsafe { (self.open)(name.as_ptr(), c"r".as_ptr()) })
     }
 }
 struct Handle<'a> {
@@ -51,13 +71,7 @@ fn build(tile: &TileSpec, source: &Path, output: &Path, api: &TiffApi) -> Result
     if dest.is_file() {
         return Ok(());
     }
-    let name = CString::new(
-        source
-            .join(&tile.file)
-            .to_str()
-            .context("Non UTF-8 TIFF path")?,
-    )?;
-    let raw = unsafe { (api.open)(name.as_ptr(), c"r".as_ptr()) };
+    let raw = api.open_path(&source.join(&tile.file))?;
     ensure!(!raw.is_null(), "Cannot open native TIFF");
     let handle = Handle { raw, api };
     let (mut width, mut height, mut rows) = (0u32, 0u32, 0u32);

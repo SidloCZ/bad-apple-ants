@@ -120,7 +120,7 @@ with atlas(rng.integers(0, 2, (64, 64), dtype=np.uint8), "mixed") as cuda:
             np.testing.assert_array_equal(full["shape_counts"], legacy["shape_counts"])
         checks += len(scenes)
         print(
-            f"All17 ROI/contour/border integer counts match CPU; padding invariance and mirror identity: {w}x{h}",
+            f"All 17 ROI/contour/border integer counts match CPU; padding invariance and mirror identity: {w}x{h}",
             flush=True,
         )
     build = cuda.build
@@ -141,7 +141,7 @@ for land in [0, 1]:
         missing = np.array([[15, 90 - (h / 2 - 1.5) * step, 4, 0, 0]])
         invalid = cuda.score_structure(missing, np.zeros((h, w), np.uint8), border_y=2)
         assert invalid["missing"][0] > 0 and invalid["structure_objective"][0] == -1
-print("Constant white/black content scores1; missing source pixels outside ROI still reject a view", flush=True)
+print("Constant white/black content scores 1; missing source pixels outside ROI still reject a view", flush=True)
 report = dict(
     integer_count_differences=0,
     padding_invariance_differences=0,
@@ -152,4 +152,5 @@ report = dict(
     sizes=[[64, 48], [512, 384], [1444, 1080]],
     cuda_build=build,
 )
+Path("output").mkdir(exist_ok=True)
 Path("output/coastline-content-cuda-validation.json").write_text(json.dumps(report, indent=2))

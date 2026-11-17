@@ -65,7 +65,11 @@ def main(argv=None):
     files = [] if args.no_video else [VIDEO]
     files += FONTS
     result = [fetch(url, args.assets / relative, expected) for url, relative, expected in files]
-    (args.assets / "source.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    record = args.assets / "source.json"
+    if record.is_file():  # keep entries of files not fetched this time (e.g. the video with --no-video)
+        fetched = {entry["path"] for entry in result}
+        result = [e for e in json.loads(record.read_text(encoding="utf-8")) if e["path"] not in fetched] + result
+    record.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
 
 

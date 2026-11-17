@@ -232,7 +232,7 @@ class CudaAtlas:
             else np.zeros(len(geometry), np.int32)
         )
         if geometry.shape[1] == 5 and not np.isin(geometry[:, 4], [0, 1]).all():
-            raise ValueError("Mirror flags must be0 or1")
+            raise ValueError("Mirror flags must be 0 or 1")
         return geometry, np.ascontiguousarray(geometry[:, :4]), mirrors
 
     def close(self):

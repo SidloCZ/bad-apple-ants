@@ -227,7 +227,7 @@ def polish(cuda, seeds, target, baseline, full_count=64, cache=None):
 
 def legacy_available():
     """The optional v3 dictionary whose candidates the published v4 search also used."""
-    return (LEGACY_DICTIONARY / "complete.json").is_file() or (LEGACY_DICTIONARY / "dictionary.json").is_file()
+    return (LEGACY_DICTIONARY / "dictionary.json").is_file() and (LEGACY_DICTIONARY / "complete.json").is_file()
 
 
 class Search:
@@ -397,9 +397,8 @@ class Search:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{frame:05d}.png"
         Image.fromarray(mask * 255).save(path)
-        # Retain evidence of the metric tradeoff without changing acceptance.
-        # This lets us inspect whether the conservative legacy/mIoU floors
-        # suppress a visibly better contour once real production frames exist.
+        # Diagnostic only (acceptance is unchanged): records whether the conservative
+        # legacy/mIoU floors rejected a candidate with a better contour score.
         best = int(np.argmax(ranking(metrics)))
         diagnostic = None
         if ranking(metrics)[best] > record_score(winner) + 1e-6:

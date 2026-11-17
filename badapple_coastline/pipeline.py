@@ -254,7 +254,7 @@ def imagery(
             if success is None:
                 failures.append(
                     {
-                        "frame": i,
+                        "frame": records[i]["frame"],
                         "reason": "All recorded candidate windows unavailable; see satellite cache failure JSON",
                     }
                 )

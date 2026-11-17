@@ -279,9 +279,9 @@ if settings.get("display_treatment"):
         "Original audio is copied without tempo or pitch changes."
         if settings.get("audio_mode") == "original"
         else (
-            "Audio follows the Unicode renderer: AAC192kbps, no tempo/pitch filter, duration matched to video."
-            if settings.get("audio_mode") == "unicode"
-            else "Audio is shortened by0.1% for synchronization, as selected."
+            "Audio: AAC 192 kbps, no tempo/pitch filter, trimmed to the video length."
+            if settings.get("audio_mode") == "trim"
+            else "Audio is shortened by 0.1% for synchronization."
         )
     )
     treatment = (
@@ -290,8 +290,8 @@ if settings.get("display_treatment"):
         else "ONLY satellite photos have flash/color treatment."
     )
     if settings.get("local_map"):
-        treatment += " LOCAL uses the native10m mask: north up, gold=current footprint, cyan=past views."
-    note = f"Display: {size[0]}x{size[1]},30.000p,NDF,6,955frames once each. {treatment} The original comparison is decoded from its source and resized only; it may flash. {audio_note} Credits hold one real view; scores are n/a. Screening covers satellite pixels only; whole-video compliance is not claimed. Independent reference-view checks, not medical/broadcast certification.\nhttps://www.w3.org/TR/WCAG22/#dfn-general-flash-and-red-flash-thresholds\n\n"
+        treatment += " LOCAL uses the native 10 m mask: north up, gold=current footprint, cyan=past views."
+    note = f"Display: {size[0]}x{size[1]}, 30.000p, NDF, 6,955 frames once each. {treatment} The original comparison is decoded from its source and resized only; it may flash. {audio_note} Credits hold one real view; scores are n/a. Screening covers satellite pixels only; whole-video compliance is not claimed. Independent reference-view checks, not medical/broadcast certification.\nhttps://www.w3.org/TR/WCAG22/#dfn-general-flash-and-red-flash-thresholds\n\n"
     description = description.replace("Satellite imagery\n", note + "Satellite imagery\n", 1)
 assert len(title) <= 100 and len(description) <= 5000 and len(description.encode("utf-8")) < 5000
 (out / "youtube-title.txt").write_text(title + "\n", encoding="utf-8")

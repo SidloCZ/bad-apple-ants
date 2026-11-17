@@ -98,7 +98,7 @@ def run():
     x = linear(treated)[:, 4:8, 4:10]
     ratio = x[:, :, :, 0] / np.maximum(x.sum(axis=3), 1e-30)
     assert ratio.max() < 0.8
-    # Black has no saturated-red area; old color is retained for31frames only.
+    # Black has no saturated-red area; old color is retained for 31 frames only.
     red = np.zeros((12, 16, 3), np.uint8)
     red[:, :, 0] = 255
     black = np.zeros_like(red)
@@ -144,6 +144,7 @@ def run():
         shadow_chroma_not_amplified=True,
         maximum_near_black_color_channel_spread=int(shadow_spread.max()),
     )
+    Path("output").mkdir(exist_ok=True)
     Path("output/flash-cuda-chroma-validation.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
 

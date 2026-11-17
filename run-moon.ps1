@@ -4,7 +4,7 @@
 #   ./run-moon.ps1 -Stage search    # any stage can be re-run or resumed on its own
 #
 # Needs: Windows, an NVIDIA GPU with the CUDA Toolkit (cuBLAS), Visual Studio C++ tools,
-# Rust, FFmpeg on PATH and the .venv from setup.ps1. Downloads ~95 GB (Kaguya TC
+# Rust, FFmpeg on PATH and the .venv from setup.ps1. Downloads ~100 GB (Kaguya TC
 # overviews + the 6 GB WAC mosaic); the search is about a day on an RTX 4090.
 param(
     [ValidateSet('all','data','frames','verify','search','refine','crops','encode')][string]$Stage = 'all',
@@ -43,17 +43,22 @@ if (Test-Stage 'data') {
     if (-not (Test-Path $catalog)) { Invoke-Step $python @('-u','-m','badapple_moon','catalog','--series','stereo') }
     $jobs = @()
     for ($k = 0; $k -lt $IngestShards; $k++) {
-        $jobs += Start-Process -FilePath $python -NoNewWindow -PassThru -ArgumentList @('-u','-m','badapple_moon','ingest-tc',
+        $job = Start-Process -FilePath $python -NoNewWindow -PassThru -ArgumentList @('-u','-m','badapple_moon','ingest-tc',
             '--catalog',$catalog,'--part',"$k",'--parts',"$IngestShards",'--output',"cache/moon/tiles-stereo-$k",'--workers','40')
+        $null = $job.Handle  # keeps the exit code readable after the process ends
+        $jobs += $job
     }
     $jobs | Wait-Process
+    foreach ($job in $jobs) { if ($job.ExitCode -ne 0) { throw "Stereo ingest shard failed (exit $($job.ExitCode)). Finished work stays cached." } }
     for ($k = 0; $k -lt $IngestShards; $k++) { Invoke-Step $python @('-u','-m','badapple_moon','qa-images','--tiles',"cache/moon/tiles-stereo-$k") }
 }
 $extra = (Get-ChildItem -Directory -Path 'cache/moon' -Filter 'tiles-stereo-*' -ErrorAction SilentlyContinue |
     Where-Object { Test-Path (Join-Path $_.FullName 'tc_index.jsonl') } | Sort-Object Name | ForEach-Object { "cache/moon/$($_.Name)" }) -join ','
-$tiles = @('--extra-tiles',$extra,'--shard-gb',"$ShardGB")
+# Windows PowerShell 5.1 drops empty arguments, so pass --extra-tiles only when there are stereo tiles.
+$tiles = @('--shard-gb',"$ShardGB")
+if ($extra) { $tiles = @('--extra-tiles',$extra) + $tiles }
 if (Test-Stage @('frames','verify','search','refine')) {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File cuda/moon/build.ps1 | Out-Null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File cuda/moon/build.ps1
     if ($LASTEXITCODE -ne 0) { throw 'CUDA build failed' }
     cargo build --release --locked --manifest-path rust/moon-search/Cargo.toml
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }

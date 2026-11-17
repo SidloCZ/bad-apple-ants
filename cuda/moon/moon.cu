@@ -325,14 +325,14 @@ struct Context {
     int nq = 0, chunk = 0, cols = 0;
     Pose* poses[2] = {nullptr, nullptr};
     Pose* host[2] = {nullptr, nullptr};
-    cudaEvent_t done[2];
+    cudaEvent_t done[2] = {nullptr, nullptr};
     int turn = 0;
     __half* patches = nullptr;
     uint8_t* valid = nullptr;
     __half* scores = nullptr;   // chunk x cols, column major
     Entry* lists = nullptr;     // cols x TOPK
-    cudaStream_t stream;
-    cublasHandle_t handle;
+    cudaStream_t stream = nullptr;
+    cublasHandle_t handle = nullptr;
     // scratch for the float paths
     Pose* sp = nullptr; float* sf = nullptr; uint8_t* sv = nullptr; float* ss = nullptr; int* si = nullptr; float* so = nullptr;
     size_t scratch = 0;
@@ -362,10 +362,14 @@ API int mb_level_size() { return (int)sizeof(Level); }
 
 // A context holds one shard of the rasters: levels [level_base, level_base + n_levels) of the global
 // list, with offsets relative to the shard's own byte range.
+API void mb_destroy(void* ctx);
+
 API void* mb_create(const uint8_t* raster, unsigned long long raster_bytes, const Level* levels, int n_levels,
                     unsigned level_base, const float* q32, const float* q64, int nq, int chunk) {
+    Context* c = nullptr;
     try {
-        auto* c = new Context();
+        if (n_levels <= 0 || nq <= 0 || chunk <= 0) throw std::runtime_error("empty shard, queries or chunk");
+        c = new Context();
         c->n_levels = n_levels; c->nq = nq; c->chunk = chunk; c->cols = nq + 2;
         check(cudaStreamCreateWithFlags(&c->stream, cudaStreamNonBlocking));
         blas(cublasCreate(&c->handle));
@@ -383,6 +387,7 @@ API void* mb_create(const uint8_t* raster, unsigned long long raster_bytes, cons
         check(cudaMalloc(&c->q16, (size_t)nq * DIM * sizeof(__half)));
         size_t total = (size_t)nq * DIM;
         to_half<<<(unsigned)((total + 255) / 256), 256, 0, c->stream>>>(c->q32, c->q16, total);
+        check(cudaGetLastError());
         for (int i = 0; i < 2; ++i) {
             check(cudaMalloc(&c->poses[i], (size_t)chunk * sizeof(Pose)));
             check(cudaMallocHost(&c->host[i], (size_t)chunk * sizeof(Pose)));
@@ -395,9 +400,14 @@ API void* mb_create(const uint8_t* raster, unsigned long long raster_bytes, cons
         check(cudaMalloc(&c->lists, (size_t)c->cols * TOPK * sizeof(Entry)));
         int count = c->cols * TOPK;
         init_lists<<<(count + 255) / 256, 256, 0, c->stream>>>(c->lists, count);
+        check(cudaGetLastError());
         check(cudaStreamSynchronize(c->stream));
         return c;
-    } catch (const std::exception& e) { last_error = e.what(); return nullptr; }
+    } catch (const std::exception& e) {
+        last_error = e.what();
+        mb_destroy(c);  // release whatever was allocated before the failure
+        return nullptr;
+    }
 }
 
 // Queue one chunk of poses; returns once the poses are staged (the GPU work runs asynchronously).
@@ -450,6 +460,9 @@ API int mb_sample(void* ctx, const Pose* poses, int n, int gw, float* out, uint8
     try {
         auto* c = (Context*)ctx;
         int dim = gw * gw * 3 / 4;
+        // The scratch buffers hold up to 64x48 samples per pose.
+        if (gw != 32 && gw != 64) throw std::runtime_error("grid must be 32 or 64");
+        if (n <= 0) return 0;
         ensure_scratch(c, n, dim);
         check(cudaMemcpyAsync(c->sp, poses, (size_t)n * sizeof(Pose), cudaMemcpyHostToDevice, c->stream));
         sample_float_kernel<<<n, ST, 0, c->stream>>>(c->raster, c->indexed, c->sp, n, gw, c->sf, c->sv, c->ss);
@@ -468,6 +481,7 @@ API int mb_score(void* ctx, const Pose* poses, const int* qidx, int n, int gw, f
         auto* c = (Context*)ctx;
         int dim = gw * gw * 3 / 4;
         if (gw != 32 && gw != 64) throw std::runtime_error("grid must be 32 or 64");
+        if (n <= 0) return 0;
         ensure_scratch(c, n, dim);
         check(cudaMemcpyAsync(c->sp, poses, (size_t)n * sizeof(Pose), cudaMemcpyHostToDevice, c->stream));
         check(cudaMemcpyAsync(c->si, qidx, (size_t)n * sizeof(int), cudaMemcpyHostToDevice, c->stream));
@@ -486,12 +500,15 @@ API int mb_score(void* ctx, const Pose* poses, const int* qidx, int n, int gw, f
 API void mb_destroy(void* ctx) {
     auto* c = (Context*)ctx;
     if (!c) return;
-    cudaStreamSynchronize(c->stream);
+    if (c->stream) cudaStreamSynchronize(c->stream);
     cudaFree(c->raster); cudaFree(c->levels); cudaFree(c->q16); cudaFree(c->q32); cudaFree(c->q64);
-    for (int i = 0; i < 2; ++i) { cudaFree(c->poses[i]); cudaFreeHost(c->host[i]); cudaEventDestroy(c->done[i]); }
+    for (int i = 0; i < 2; ++i) {
+        cudaFree(c->poses[i]); cudaFreeHost(c->host[i]);
+        if (c->done[i]) cudaEventDestroy(c->done[i]);
+    }
     cudaFree(c->patches); cudaFree(c->valid); cudaFree(c->scores); cudaFree(c->lists);
     cudaFree(c->sp); cudaFree(c->sf); cudaFree(c->sv); cudaFree(c->ss); cudaFree(c->si); cudaFree(c->so);
-    cublasDestroy(c->handle);
-    cudaStreamDestroy(c->stream);
+    if (c->handle) cublasDestroy(c->handle);
+    if (c->stream) cudaStreamDestroy(c->stream);
     delete c;
 }

@@ -5,7 +5,7 @@
 # unless the new search scored better on the original 10 m mask. This script runs those
 # stages in the same order; each writes its own output/<stage> directory and resumes.
 #
-#   ./run-satellite.ps1                   # everything, in order (weeks of downloads and GPU time)
+#   ./run-satellite.ps1                   # everything, in order (days of downloads and GPU time)
 #   ./run-satellite.ps1 -Stage precision  # one stage; earlier stages' outputs must exist
 #
 #   fetch      mask (7.3 GB), Natural Earth, source video and fonts
@@ -41,7 +41,7 @@ function Invoke-Native {
 }
 function Build-Rust([string]$Crate) { Invoke-Native 'cargo' @('build','--release','--locked','--manifest-path',"rust/$Crate/Cargo.toml") }
 function Build-Cuda([string]$Name) {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File "cuda/$Name/build.ps1" | Out-Null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File "cuda/$Name/build.ps1"
     if ($LASTEXITCODE -ne 0) { throw "CUDA build failed: $Name" }
 }
 

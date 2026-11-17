@@ -305,7 +305,17 @@ fn main() -> Result<()> {
     let search_seconds = started.elapsed().as_secs_f64() - load_seconds;
     let mut completed = HashSet::new();
     if config.output.exists() {
-        for line in BufReader::new(File::open(&config.output)?).lines() {
+        // An interrupted run can leave a partial last line: cut the file back to the last
+        // complete record so new records are not appended onto the fragment.
+        let text = std::fs::read(&config.output)?;
+        let keep = text.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        if keep < text.len() {
+            File::options()
+                .write(true)
+                .open(&config.output)?
+                .set_len(keep as u64)?;
+        }
+        for line in BufReader::new(&text[..keep]).lines() {
             if let Ok(record) = serde_json::from_str::<Record>(&line?) {
                 completed.insert(record.frame);
             }
@@ -351,9 +361,11 @@ fn main() -> Result<()> {
                 frame: i,
             };
             {
+                // One write per record, so a crash never leaves more than one partial line.
+                let mut line = serde_json::to_vec(&record)?;
+                line.push(b'\n');
                 let mut sink = sink.lock().unwrap();
-                serde_json::to_writer(&mut *sink, &record)?;
-                sink.write_all(b"\n")?;
+                sink.write_all(&line)?;
                 sink.flush()?;
             }
             let count = done.fetch_add(1, Ordering::Relaxed) + 1;

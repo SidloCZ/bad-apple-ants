@@ -1,6 +1,6 @@
 """Country / continent assignment and statistics for every displayed view.
 
-Method (documented in LANDWATER-OSM.md):
+Method (see also docs/satellite.md, land & water edition):
 
 * Boundaries: Natural Earth 1:10m Admin-0 *map units* (public domain, de facto
   "ground truth" point of view). Countries are counted by ``ADMIN`` so that
@@ -24,7 +24,6 @@ Method (documented in LANDWATER-OSM.md):
 from __future__ import annotations
 import argparse, json, math, time
 from collections import Counter, defaultdict
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
 import shapely
@@ -257,7 +256,7 @@ def _assign_job(item):
     return index, assign(corners)
 
 
-def build(records, matched_frames, workers=16):
+def build(records, matched_frames):
     """records: displayed records in video order; matched_frames: count of matched (non-credit) frames."""
     from .footprint_map import footprint
 
@@ -273,12 +272,11 @@ def build(records, matched_frames, workers=16):
             order.append(key)
         frames_of[key].append(i)
     jobs = [(views[k]["view"], views[k]["corners_lonlat"]) for k in order]
-    # Serial on purpose (~80 s): worker processes died intermittently on this machine.
-    if True:
-        for n, (index, result) in enumerate(map(_assign_job, jobs), 1):
-            views[order[index]].update(result)
-            if n % 500 == 0 or n == len(jobs):
-                print(f"geostats: {n}/{len(jobs)} views; {time.perf_counter() - start:.0f}s", flush=True)
+    # Serial on purpose (~80 s): process pools failed intermittently on Windows (WinError 6).
+    for n, (index, result) in enumerate(map(_assign_job, jobs), 1):
+        views[order[index]].update(result)
+        if n % 500 == 0 or n == len(jobs):
+            print(f"geostats: {n}/{len(jobs)} views; {time.perf_counter() - start:.0f}s", flush=True)
     view_list = [views[k] for k in order]
     clusters = places(view_list)
     for v, key, c in zip(view_list, order, clusters):
@@ -390,10 +388,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--workers", type=int, default=16)
     args = parser.parse_args()
     records = read_records(SOURCE / "frames.jsonl")
-    data = build(records, CREDIT_START, args.workers)
+    data = build(records, CREDIT_START)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     s = data["stats"]

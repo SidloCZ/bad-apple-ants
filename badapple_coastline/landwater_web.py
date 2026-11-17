@@ -7,7 +7,7 @@ the same capture-date and imagery text as on screen, and its ending credits
 (frames 6,563-6,955), which hold one fixed real view with no match score."""
 
 from __future__ import annotations
-import argparse, csv, io, json, shutil, subprocess, time
+import argparse, csv, io, json, subprocess, time
 from pathlib import Path
 import numpy as np
 from PIL import Image

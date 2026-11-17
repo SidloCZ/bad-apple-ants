@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 from .cuda_backend import CudaAtlas
 from .data import digest, MASK_CREDIT
 from .pipeline import read_records, write_json
-from .precision_config import OUTPUT, KEYS
+from .precision_config import OUTPUT
 from .precision_search import vector
 from badapple_media import ffmpeg_binary, probe, read_exact, ui_font
 
@@ -231,6 +231,7 @@ def encode(planes, size, count, fps, source, output, lossless=None, mirror_allow
     )
     with tempfile.TemporaryFile() as log:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=log)
+        i = -1
         try:
             for i, plane in enumerate(planes):
                 if plane.shape != (size[1], size[0]) or plane.dtype != np.uint8:
@@ -285,7 +286,7 @@ def audit_pixels(movie, hashes, threshold=False, crop=None, check_audio=True):
         frames=count,
         decode_errors=0,
         pixel_hash_differences=0,
-        comparison="threshold128 binary silhouette" if threshold else "all original grayscale pixel values",
+        comparison="threshold-128 binary silhouette" if threshold else "all original grayscale pixel values",
     )
 
 
@@ -353,22 +354,22 @@ def run(output=OUTPUT):
     credits = MASK_CREDIT + "\nhttps://doi.org/10.5281/zenodo.14899246\nhttps://creativecommons.org/licenses/by/4.0/\n"
     credits += "White=land, black=water. Original mask cropped, rotated, optionally horizontally mirrored and sampled at each exact geographic field of view. Per-frame mirror flags are recorded in matches.jsonl. No photographs were newly acquired for this monochrome edition.\n"
     if "structure_objective" in settings:
-        credits += "Matching excludes the source video's fixed top/bottom2pixel black letterbox. Original1444x1080 frame coordinates, unmodified source frames and full native geography masks are preserved; only descriptor/FFT padding extends the nearest content row. Content area, contours and four content-border agreements are measured without resizing.\n"
+        credits += "Matching excludes the source video's fixed top/bottom 2-pixel black letterbox. Original 1444x1080 frame coordinates, unmodified source frames and full native geography masks are preserved; only descriptor/FFT padding extends the nearest content row. Content area, contours and four content-border agreements are measured without resizing.\n"
     credits += "Underlying sources: ESA WorldCover (© ESA WorldCover project 2020/2021), OpenStreetMap contributors (https://www.openstreetmap.org/copyright), Copernicus DEM.\n"
     credits += "Original Bad Apple!! music and shadow animation retain the rights of their creators. Song: Alstroemeria Records, Masayoshi Minoshima, Haruka, nomico; original composition ZUN. Shadow PV: Anira (あにら), https://www.nicovideo.jp/watch/sm8628149 .\n"
     (output / "MONOCHROME-CREDITS.txt").write_text(credits, encoding="utf-8")
-    readme = """# Monochrome review edition
+    readme = """# Monochrome land/water edition
 
-badapple-land-water.mp4: matched real land/water silhouettes only, at1444x1080. Audio is copied from the original video.
+badapple-land-water.mp4: matched real land/water silhouettes only, at 1444x1080. Audio is copied from the original video.
 badapple-land-water-lossless.mkv: FFV1 archival master; every decoded grayscale pixel is verified against the selected original-size masks.
-badapple-land-water-comparison.mp4: original silhouette on the left, matched real geography on the right. Both panels retain all1444x1080pixels.
+badapple-land-water-comparison.mp4: original silhouette on the left, matched real geography on the right. Both panels retain all 1444x1080 pixels.
 
-The MP4 silhouette was rethresholded at128 and every binary frame was verified unchanged by compression. All original grayscale pixels in the lossless master were independently decoded and hashed.
+The MP4 silhouette was rethresholded at 128 and every binary frame was verified unchanged by compression. All original grayscale pixels in the lossless master were independently decoded and hashed.
 matches.jsonl retains exact coordinates, scale, rotation, native metrics and provenance for every frame. monochrome-summary.json contains final measurements and file hashes.
 No new satellite photographs are acquired by this stage. Full attribution is in MONOCHROME-CREDITS.txt.
 """
     if "structure_objective" in settings:
-        readme += "\nMetrics use the original1444x1076content pixels, excluding only the fixed top/bottom2pixel source-video letterbox. Frame coordinates and all original1444x1080 video pixels are preserved. Baseline views are freshly remeasured using the same content metric; historical full-frame scores are not directly comparable.\n"
+        readme += "\nMetrics use the original 1444x1076 content pixels, excluding only the fixed top/bottom 2-pixel source-video letterbox. Frame coordinates and all original 1444x1080 video pixels are preserved. Baseline views are freshly remeasured using the same content metric; historical full-frame scores are not directly comparable.\n"
     (output / "MONOCHROME-README.md").write_text(readme, encoding="utf-8")
     write_json(output / "monochrome-summary.json", summary)
     print(json.dumps(summary, indent=2), flush=True)
