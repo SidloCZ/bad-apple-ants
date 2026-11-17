@@ -1,0 +1,12 @@
+# Environments and build output
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+rust/**/target/
+cuda/**/build/
+
+# Downloaded data, caches and rendered videos (never committed)
+assets/
+cache/
+output/

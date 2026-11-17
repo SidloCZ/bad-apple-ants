@@ -1,0 +1,27 @@
+[package]
+name = "coastline-native"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+name = "coastline_native"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "coastline-native-build"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+coastline-matcher = { path = "../coastline-matcher" }
+libloading = "0.8"
+memmap2 = "0.9"
+rayon = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

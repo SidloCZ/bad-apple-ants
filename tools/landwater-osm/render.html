@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>OSM panel renderer</title>
+<link rel="stylesheet" href="/lib/maplibre-gl/maplibre-gl.css">
+<script src="/lib/maplibre-gl/maplibre-gl.js"></script>
+<script src="/lib/basemaps/basemaps.js"></script>
+<script src="/style.js"></script>
+<style>html,body{margin:0;background:#080f17;overflow:hidden}#map{position:absolute;left:0;top:0}</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+// Renders north-up base maps for one shard of /views.json and POSTs each PNG.
+// Footprint overlays are drawn later in Python with the same Web Mercator maths,
+// so one base map serves every frame that shows the same view.
+const q = new URLSearchParams(location.search);
+const shard = +(q.get('shard') || 0), of = +(q.get('of') || 1);
+const W = +(q.get('w') || 520), H = +(q.get('h') || 392), ratio = +(q.get('ratio') || 2);
+const el = document.getElementById('map'); el.style.width = W + 'px'; el.style.height = H + 'px';
+const log = (s) => fetch('/log', { method: 'POST', body: `[shard ${shard}] ${s}` });
+window.addEventListener('error', (e) => log(`ERROR ${e.message}`));
+
+(async () => {
+  try {
+    const all = (await (await fetch('/views.json')).json()).views;
+    const views = all.filter((_, i) => i % of === shard);
+    if (q.get('keys')) log('flavor keys: ' + Object.keys(basemaps.namedFlavor('dark')).join(','));
+    const map = new maplibregl.Map({
+      container: 'map', style: buildStyle(location.origin), center: [0, 0], zoom: 1,
+      pixelRatio: ratio, interactive: false, attributionControl: false, fadeDuration: 0,
+      renderWorldCopies: true, canvasContextAttributes: { preserveDrawingBuffer: true, antialias: true },
+    });
+    map.on('error', (e) => log(`ERROR map ${e.error && e.error.message}`));
+    await new Promise((r) => map.once('load', r));
+    let n = 0; const t0 = performance.now();
+    for (const v of views) {
+      const idle = new Promise((r) => map.once('idle', r));
+      map.jumpTo({ center: v.center, zoom: v.zoom, bearing: 0, pitch: 0 });
+      map.triggerRepaint();
+      await idle;
+      if (!map.areTilesLoaded()) await new Promise((r) => map.once('idle', r));
+      const blob = await new Promise((r) => map.getCanvas().toBlob(r, 'image/png'));
+      const res = await fetch('/result/' + v.name, { method: 'POST', body: blob });
+      if (!res.ok) throw new Error('result upload failed');
+      if (++n % 50 === 0) log(`${n}/${views.length} ${(n / ((performance.now() - t0) / 1000)).toFixed(2)} maps/s`);
+    }
+    log(`complete ${n}/${views.length}`);
+    await fetch('/done/' + shard);
+  } catch (e) {
+    await log(`ERROR ${e && e.stack || e}`);
+  }
+})();
+</script>
+</body>
+</html>
