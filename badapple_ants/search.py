@@ -235,7 +235,7 @@ def run_search(
     start_s: float = 25.0,
     duration_s: float = 25.0,
     cooldown: int = 15,
-    max_reuse: int = 4,
+    max_reuse: int = 6,
 ) -> dict:
     """Run coarse 32x24 GPU NCC search, 64x48 refinement, and timeline assignment."""
     if not torch.cuda.is_available():

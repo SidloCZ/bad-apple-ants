@@ -25,6 +25,19 @@ PREV_W, PREV_H = 288, 216
 CHART_W, CHART_H = 288, 56
 
 
+MAIN_MODES = ("grayscale", "grayscale-stretch", "color")
+
+
+def _stretch_grayscale(gray_img: Image.Image, low_pct: float = 1.0, high_pct: float = 99.0) -> Image.Image:
+    """Apply gentle percentile contrast stretch to an L-mode image."""
+    arr = np.asarray(gray_img, dtype=np.float32)
+    lo, hi = np.percentile(arr, (low_pct, high_pct))
+    if hi - lo < 1.0:
+        return gray_img
+    stretched = np.clip((arr - lo) * (255.0 / (hi - lo)), 0.0, 255.0).astype(np.uint8)
+    return Image.fromarray(stretched, mode="L")
+
+
 def _load_font(assets_dir: Path, filename: str, size: int) -> ImageFont.ImageFont:
     font_path = assets_dir / "fonts" / filename
     if font_path.is_file():
@@ -106,6 +119,7 @@ def _write_credits(frames: list[dict], out_path: Path) -> None:
         "",
         "Source video and music: Bad Apple!! (Alstroemeria Records / ZUN / Anira shadow PV).",
         "Data sources: GBIF occurrences from iNaturalist Research-Grade and AntWeb (California Academy of Sciences).",
+        "GBIF Download Citation: GBIF.org (20 November 2026) GBIF Occurrence Download https://doi.org/10.15468/dl.dyc97c",
         "",
         "Per-image attributions (sorted by frame count):",
         "",
@@ -128,8 +142,12 @@ def render_video(
     assets_dir: Path,
     cache_dir: Path,
     output_dir: Path,
+    main_mode: str = "grayscale-stretch",
 ) -> Path:
     """Render 1280x720 MP4 with sidebar previews, NCC sparkline, credits, and stills."""
+    if main_mode not in MAIN_MODES:
+        raise ValueError(f"Unsupported main_mode={main_mode!r}; expected one of {MAIN_MODES}")
+
     payload = json.loads(matches_path.read_text(encoding="utf-8"))
     frames = payload["frames"]
     clip_meta = payload["clip"]
@@ -222,8 +240,9 @@ def render_video(
     ]
 
     last_crop_key: tuple | None = None
-    last_main_crop: Image.Image | None = None
-    last_gray_prev: Image.Image | None = None
+    last_main_panel: Image.Image | None = None
+    last_side_prev: Image.Image | None = None
+    side_label = "GRAYSCALE MATCH" if main_mode == "color" else "COLOR MATCH"
 
     with tempfile.TemporaryFile() as err_log:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err_log)
@@ -245,12 +264,12 @@ def render_video(
                     round(pose["theta"], 6),
                     bool(pose["mirrored"]),
                 )
-                if crop_key == last_crop_key and last_main_crop is not None and last_gray_prev is not None:
-                    main_crop = last_main_crop
-                    gray_prev = last_gray_prev
+                if crop_key == last_crop_key and last_main_panel is not None and last_side_prev is not None:
+                    main_panel = last_main_panel
+                    side_prev = last_side_prev
                 else:
                     src_img = lru.get(img_path)
-                    main_crop = render_crop(
+                    color_crop = render_crop(
                         src_img,
                         MAIN_W,
                         MAIN_H,
@@ -260,17 +279,25 @@ def render_video(
                         pose["theta"],
                         bool(pose["mirrored"]),
                     )
-                    gray_prev = (
-                        main_crop.convert("L")
-                        .resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
-                        .convert("RGB")
-                    )
+                    if main_mode == "color":
+                        main_panel = color_crop
+                        side_prev = (
+                            color_crop.convert("L")
+                            .resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
+                            .convert("RGB")
+                        )
+                    else:
+                        gray_l = color_crop.convert("L")
+                        if main_mode == "grayscale-stretch":
+                            gray_l = _stretch_grayscale(gray_l)
+                        main_panel = gray_l.convert("RGB")
+                        side_prev = color_crop.resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
                     last_crop_key = crop_key
-                    last_main_crop = main_crop
-                    last_gray_prev = gray_prev
+                    last_main_panel = main_panel
+                    last_side_prev = side_prev
 
                 canvas = Image.new("RGB", (OUT_W, OUT_H), (18, 19, 22))
-                canvas.paste(main_crop, (0, 0))
+                canvas.paste(main_panel, (0, 0))
                 draw = ImageDraw.Draw(canvas)
 
                 x0 = SIDE_X + PAD
@@ -284,9 +311,9 @@ def render_video(
                 canvas.paste(orig_pil, (x0, 32))
                 draw.rectangle((x0 - 1, 31, x0 + PREV_W, 32 + PREV_H), outline=(42, 45, 52))
 
-                # 2. Grayscale luminance match preview
-                draw.text((x0, 258), "GRAYSCALE MATCH", fill=(156, 163, 175), font=font_label)
-                canvas.paste(gray_prev, (x0, 278))
+                # 2. Secondary match preview (color crop when main is grayscale, or vice versa)
+                draw.text((x0, 258), side_label, fill=(156, 163, 175), font=font_label)
+                canvas.paste(side_prev, (x0, 278))
                 draw.rectangle((x0 - 1, 277, x0 + PREV_W, 278 + PREV_H), outline=(42, 45, 52))
 
                 # 3. Live NCC sparkline up to current frame t

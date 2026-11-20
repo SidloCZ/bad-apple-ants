@@ -8,10 +8,8 @@ Forked from upstream reference repository [`ikuto32/bad-apple-earth-moon`](https
 
 ## 1. Rendering & Visual Readability (Top Priority)
 
-- [ ] **Swap main and sidebar photo modes (grayscale main / color in sidebar)**
-  - **Why:** Rendering full-color photos on the `960x720` main panel introduces rapid frame-to-frame hue flashing (green leaves, brown soil, yellow/white studio backdrops) that distracts from the silhouette flow.
-  - **Main panel (`960x720`):** Display the matched ant photograph in grayscale luminance so silhouettes stay cohesive and legible across cuts, with optional gentle black/white point tone-mapping (similar to `bad-apple-earth-moon`'s Moon edition).
-  - **Sidebar preview (`288x216`):** Replace the `GRAYSCALE MATCH` box with the original color photograph — either showing the matched color crop directly or showing the full uncropped color source image with a bounding box marking the matched crop region — alongside the `ORIGINAL` *Bad Apple!!* reference frame.
+- [x] **Swap main and sidebar photo modes (grayscale main / color in sidebar)**
+  - **Implemented:** `badapple_ants/render.py` (`--main-mode grayscale` default, `grayscale-stretch` 1%–99% percentile tone-mapping, and `color` legacy mode) now renders the `960x720` main panel in grayscale and moves the matched color crop to the `288x216` `COLOR MATCH` sidebar preview.
 - [ ] **Flash and luminance stabilization**
   - Inspect `cuda/video_flash/` in upstream `ikuto32/bad-apple-earth-moon` and add temporal luminance smoothing / flash-limiting across hard cuts where needed so sudden bright-dark swings remain comfortable to watch.
 - [ ] **Optional sidebar telemetry enhancements**

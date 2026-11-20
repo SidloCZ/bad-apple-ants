@@ -8,7 +8,7 @@ from pathlib import Path
 from .catalog import build_catalog
 from .download import download_thumbs, download_winners
 from .media import fetch_media
-from .render import render_video
+from .render import MAIN_MODES, render_video
 from .search import run_search
 
 
@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> None:
     p_search.add_argument("--start", type=float, default=25.0)
     p_search.add_argument("--duration", type=float, default=25.0)
     p_search.add_argument("--cooldown", type=int, default=15)
-    p_search.add_argument("--max-reuse", type=int, default=4)
+    p_search.add_argument("--max-reuse", type=int, default=6)
 
     p_win = sub.add_parser("fetch-winners", help="Download full-resolution photos for winning matches")
     p_win.add_argument("--matches", type=Path, default=Path("output/proto/matches.json"))
@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> None:
     p_ren.add_argument("--assets", type=Path, default=Path("assets"))
     p_ren.add_argument("--cache", type=Path, default=Path("cache"))
     p_ren.add_argument("--output", type=Path, default=Path("output/proto"))
+    p_ren.add_argument("--main-mode", choices=MAIN_MODES, default="grayscale-stretch")
 
     p_all = sub.add_parser("run-all", help="Run every prototype stage end-to-end")
     p_all.add_argument("--assets", type=Path, default=Path("assets"))
@@ -60,7 +61,8 @@ def main(argv: list[str] | None = None) -> None:
     p_all.add_argument("--start", type=float, default=25.0)
     p_all.add_argument("--duration", type=float, default=25.0)
     p_all.add_argument("--cooldown", type=int, default=15)
-    p_all.add_argument("--max-reuse", type=int, default=4)
+    p_all.add_argument("--max-reuse", type=int, default=6)
+    p_all.add_argument("--main-mode", choices=MAIN_MODES, default="grayscale-stretch")
 
     args = parser.parse_args(argv)
 
@@ -88,7 +90,14 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "fetch-winners":
         download_winners(args.matches, args.cache, concurrency=args.concurrency)
     elif args.command == "render":
-        render_video(args.matches, args.video, args.assets, args.cache, args.output)
+        render_video(
+            args.matches,
+            args.video,
+            args.assets,
+            args.cache,
+            args.output,
+            main_mode=args.main_mode,
+        )
     elif args.command == "run-all":
         fetch_media(args.assets)
         cat_path = args.cache / "catalog.jsonl"
@@ -111,6 +120,7 @@ def main(argv: list[str] | None = None) -> None:
             args.assets,
             args.cache,
             args.output,
+            main_mode=args.main_mode,
         )
 
 

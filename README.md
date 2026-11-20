@@ -8,7 +8,7 @@ Built as a fork and adaptation of the Moon pipeline (`badapple_moon` and `cuda/m
 
 1. **Low-resolution catalog & thumbnail pack:** Queries the GBIF REST API (`taxonKey=4342`, `Formicidae`) for permissive-license iNaturalist field photos and non-label AntWeb specimen views (`head`, `profile`, `dorsal`, `ventral`). Downloads lightweight `/small` and `_thumbview` thumbnails and packs proportional `192x192` grayscale tensors into `cache/pack/`.
 2. **GPU coarse search & refinement:** Runs an ant-first `32x24` normalized cross-correlation (NCC) search on CUDA across 16 rotations, 3 crop scales (`55%–94%` of max fit width), shifts, and horizontal mirroring, followed by 5 rounds of `64x48` coordinate-neighborhood refinement on the top-16 candidates per distinct frame.
-3. **Anti-repetition assignment & high-res render:** Selects timeline matches with configurable cooldown and max-reuse limits (`cooldown=15`, `max_reuse=4`), downloads high-resolution originals only for the winning images, and renders a `1280x720` video with original audio, sidebar previews, live NCC sparkline, species metadata, and full per-image attributions.
+3. **Anti-repetition assignment & high-res render:** Selects timeline matches with configurable cooldown and max-reuse limits (`cooldown=15`, `max_reuse=6`), downloads high-resolution originals only for the winning images, and renders a `1280x720` video with original audio, stretched grayscale main panel + color sidebar preview (`--main-mode grayscale-stretch` default, `grayscale`, or `color`), live NCC sparkline, species metadata, and full per-image attributions.
 
 ## Requirements & Setup
 
@@ -34,9 +34,9 @@ Or run individual stages:
 uv run python -m badapple_ants fetch-media
 uv run python -m badapple_ants catalog --inat 6500 --antweb 3500
 uv run python -m badapple_ants download-thumbs
-uv run python -m badapple_ants search --start 25 --duration 25 --cooldown 15 --max-reuse 4
+uv run python -m badapple_ants search --start 25 --duration 25 --cooldown 15 --max-reuse 6
 uv run python -m badapple_ants fetch-winners
-uv run python -m badapple_ants render
+uv run python -m badapple_ants render --main-mode grayscale-stretch
 ```
 
 ## Workspace Layout
@@ -65,5 +65,5 @@ uv run python -m badapple_ants render
 
 - **Original project and architecture:** **ikuto32** — [**ikuto32/bad-apple-earth-moon**](https://github.com/ikuto32/bad-apple-earth-moon) (MIT License). The two-stage low-res GPU NCC search, local pose refinement, and high-res winner crop pipeline in this repository directly adapt the approach pioneered in `badapple_moon` and `cuda/moon`.
 - **Source animation and music:** *Bad Apple!!* (Alstroemeria Records, ZUN / Team Shanghai Alice, shadow PV by Anira). Downloaded locally only for frame matching and audio muxing; not redistributed in this repository.
-- **Ant photographs:** Sourced through [GBIF](https://www.gbif.org/) from [iNaturalist](https://www.inaturalist.org/) Research-Grade observations and [AntWeb](https://www.antweb.org/) (California Academy of Sciences), filtered to permissive licenses (`CC0-1.0`, `CC-BY-4.0`, `CC-BY-SA-4.0`, `CC-BY-NC-4.0`, `CC-BY-NC-SA-4.0`). Full image-level credits are generated in `output/proto/CREDITS.txt`.
+- **Ant photographs:** Sourced through [GBIF](https://www.gbif.org/) (`GBIF.org (20 November 2026) GBIF Occurrence Download https://doi.org/10.15468/dl.dyc97c`) from [iNaturalist](https://www.inaturalist.org/) Research-Grade observations, [AntWeb](https://www.antweb.org/) (California Academy of Sciences), and other GBIF data publishers, filtered to derivative-permitting licenses (`CC0-1.0`, `CC-BY-4.0`, `CC-BY-SA-4.0`, `CC-BY-NC-4.0`, `CC-BY-NC-SA-4.0`). Full image-level credits are generated in `output/proto/CREDITS.txt`.
 - **UI fonts:** Google Noto Sans and Noto Sans Mono (SIL Open Font License 1.1).
