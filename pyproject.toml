@@ -1,39 +1,32 @@
-[build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "bad-apple-earth-moon"
-version = "1.0.0"
-description = "Bad Apple!! where every frame is a real place: Earth's land and water with satellite photos, and the Moon"
+name = "badapple-ants"
+version = "0.1.0"
+description = "Prototype matching Bad Apple!! frames to real ant photographs on GPU"
 readme = "README.md"
-license = "MIT"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
-    "numpy>=1.26",
-    "Pillow>=10.4",
-    "rasterio>=1.3",
-    "affine>=3.0",
-    "pyproj>=3.7,<4",
-    "scipy>=1.11",
-    "shapely>=2.0",
+    "httpx>=0.27.0",
+    "imageio-ffmpeg>=0.5.1",
+    "numpy>=1.26.0",
+    "pillow>=10.4.0",
+    "pytest>=8.3.0",
+    "torch>=2.5.0",
+    "tqdm>=4.66.0",
 ]
 
-[project.optional-dependencies]
-# FAISS is only the reference backend of the first (Python) coastline matcher.
-faiss = ["faiss-cpu>=1.8"]
-test = ["pytest>=8"]
+[tool.uv]
+package = false
 
-[project.scripts]
-badapple-coastline = "badapple_coastline.cli:main"
-badapple-moon = "badapple_moon.cli:main"
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126" },
+]
 
-[tool.setuptools.packages.find]
-include = ["badapple_media*", "badapple_coastline*", "badapple_moon*"]
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.black]
-line-length = 120
-target-version = ["py311"]
+pythonpath = ["."]
