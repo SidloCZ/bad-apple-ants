@@ -2,7 +2,7 @@
 
 Planning notes and next steps following the initial GPU prototype (`8,989` thumbnails, `751` frames / `25s` clip, median `64x48` NCC `0.789`).
 
-GitHub fork of the upstream reference repository: `https://github.com/SidloCZ/bad-apple-ants` (forked from `ikuto32/bad-apple-earth-moon`).
+Forked from upstream reference repository [`ikuto32/bad-apple-earth-moon`](https://github.com/ikuto32/bad-apple-earth-moon).
 
 ---
 
@@ -13,7 +13,7 @@ GitHub fork of the upstream reference repository: `https://github.com/SidloCZ/ba
   - **Main panel (`960x720`):** Display the matched ant photograph in grayscale luminance so silhouettes stay cohesive and legible across cuts, with optional gentle black/white point tone-mapping (similar to `bad-apple-earth-moon`'s Moon edition).
   - **Sidebar preview (`288x216`):** Replace the `GRAYSCALE MATCH` box with the original color photograph — either showing the matched color crop directly or showing the full uncropped color source image with a bounding box marking the matched crop region — alongside the `ORIGINAL` *Bad Apple!!* reference frame.
 - [ ] **Flash and luminance stabilization**
-  - Inspect `cuda/video_flash/` in `SidloCZ/bad-apple-ants` and add temporal luminance smoothing / flash-limiting across hard cuts where needed so sudden bright-dark swings remain comfortable to watch.
+  - Inspect `cuda/video_flash/` in upstream `ikuto32/bad-apple-earth-moon` and add temporal luminance smoothing / flash-limiting across hard cuts where needed so sudden bright-dark swings remain comfortable to watch.
 - [ ] **Optional sidebar telemetry enhancements**
   - Add a mini world map plotting specimen/observation coordinates (`lat`/`lon` already preserved in `cache/catalog.jsonl`), a running visited-locations counter, and fixed-width footer alignment matching the upstream editions.
 
@@ -37,9 +37,9 @@ GitHub fork of the upstream reference repository: `https://github.com/SidloCZ/ba
 - [ ] **Bulk dataset ingestion (Darwin Core Archive + full AntWeb)**
   - Replace the prototype's GBIF REST API paging (`~9,000` items) with a single **GBIF Occurrence Download** (Darwin Core Archive) for Formicidae (`taxonKey=4342`, `mediaType=StillImage`, `1M+` records) plus full non-label AntWeb museum views (`~207k` head/profile/dorsal images).
   - Target `100,000-250,000` low-res thumbnails (`~3-6 GB` on disk) during search, fetching full-resolution originals only for the `~3,000-6,500` matched winners.
-- [ ] **Search throughput & upstream fork integration (`SidloCZ/bad-apple-ants`)**
-  - Evaluate scaling the PyTorch CUDA sharded search (currently `8,989` images in `~24s` coarse + `~35s` refine on the Quadro T1000 4 GB) vs. adapting the native Rust/CUDA search engine (`cuda/moon/moon.cu`, `rust/moon-search/`) from `SidloCZ/bad-apple-ants` (`CUDA_ARCH=sm_75`, `1-1.5 GB` VRAM shards).
-  - Switch final encoding from `libx264` to hardware `h264_nvenc` / `hevc_nvenc` if targeting faster full-length 1080p/1440p renders on the Quadro T1000.
+- [ ] **Search throughput & upstream engine evaluation**
+  - Evaluate scaling the PyTorch CUDA sharded search vs. adapting the native Rust/CUDA search engine (`cuda/moon/moon.cu`, `rust/moon-search/`) from upstream `ikuto32/bad-apple-earth-moon` with configurable `CUDA_ARCH` and VRAM sharding.
+  - Optionally support hardware NVENC (`h264_nvenc` / `hevc_nvenc`) alongside CPU `libx264` for faster full-length 1080p/1440p renders on supported GPUs.
 - [ ] **Attribution, licensing, and export**
   - Provide a clean `--commercial-only` flag filtering strictly to `CC0-1.0`, `CC-BY-4.0`, and `CC-BY-SA-4.0` (excluding `CC-BY-NC*` for commercial-compatible releases).
   - Export full-run `CREDITS.txt` and per-frame CSV/JSON metadata suitable for an interactive species/map explorer.

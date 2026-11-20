@@ -301,7 +301,7 @@ def run_search(
         key=lambda i: (255.0 - img_means[i]) + 1.5 * img_stds[i],
     ) or sorted(range(num_images), key=lambda i: -img_means[i])
 
-    # Load packed thumbnails and queries onto Quadro T1000.
+    # Load packed thumbnails and queries onto GPU.
     gray_pack = torch.from_numpy(gray_np).unsqueeze(1).to(device=device, dtype=torch.uint8)
     dims_gpu = torch.from_numpy(dims_np).to(device=device, dtype=torch.int32)
 

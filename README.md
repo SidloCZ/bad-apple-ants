@@ -2,7 +2,7 @@
 
 A GPU-accelerated Python prototype that matches every frame of the *Bad Apple!!* shadow-art animation to real ant photographs sourced from GBIF (iNaturalist Research-Grade observations and AntWeb museum specimens).
 
-Built as an adaptation of the Moon pipeline (`badapple_moon` and `cuda/moon`) from [**ikuto32/bad-apple-earth-moon**](https://github.com/ikuto32/bad-apple-earth-moon) by **ikuto32** (MIT License), developed alongside the fork [**SidloCZ/bad-apple-ants**](https://github.com/SidloCZ/bad-apple-ants).
+Built as a fork and adaptation of the Moon pipeline (`badapple_moon` and `cuda/moon`) from [**ikuto32/bad-apple-earth-moon**](https://github.com/ikuto32/bad-apple-earth-moon) by **ikuto32** (MIT License).
 
 ## How It Works
 
@@ -13,7 +13,7 @@ Built as an adaptation of the Moon pipeline (`badapple_moon` and `cuda/moon`) fr
 ## Requirements & Setup
 
 - Python 3.12 (provisioned automatically by [`uv`](https://docs.astral.sh/uv/))
-- NVIDIA GPU with CUDA drivers (developed and tested on a Quadro T1000 4 GB with PyTorch `cu126`; no local `nvcc`, Rust, or system `ffmpeg` installation required)
+- NVIDIA GPU with CUDA drivers (uses PyTorch `cu126` wheels with bundled CUDA runtime; runs comfortably within 4 GB VRAM; no local `nvcc`, Rust, or system `ffmpeg` installation required)
 
 ```powershell
 uv sync --python 3.12
