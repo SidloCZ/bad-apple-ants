@@ -213,6 +213,11 @@ def _taxon_fields(occ: dict) -> tuple[str, str]:
     return species, genus
 
 
+def has_genus_or_species(item: dict) -> bool:
+    """Return True when an item has at least genus- or species-level identification."""
+    return bool((item.get("genus") or "").strip()) or bool((item.get("species") or "").strip())
+
+
 def _fetch_inat(client: httpx.Client, target: int, seen_thumbs: set[str]) -> list[dict]:
     items: list[dict] = []
     years = [2025, 2024, 2023, 2022, 2021, 2020]
@@ -241,6 +246,8 @@ def _fetch_inat(client: httpx.Client, target: int, seen_thumbs: set[str]) -> lis
             for occ in results:
                 occ_key = occ.get("key")
                 species, genus = _taxon_fields(occ)
+                if not genus and not species:
+                    continue
                 country = occ.get("country") or occ.get("countryCode") or ""
                 lat = occ.get("decimalLatitude")
                 lon = occ.get("decimalLongitude")
@@ -315,6 +322,8 @@ def _fetch_antweb(client: httpx.Client, target: int, seen_thumbs: set[str]) -> l
             for occ in results:
                 occ_key = occ.get("key")
                 species, genus = _taxon_fields(occ)
+                if not genus and not species:
+                    continue
                 country = occ.get("country") or occ.get("countryCode") or ""
                 lat = occ.get("decimalLatitude")
                 lon = occ.get("decimalLongitude")
@@ -479,6 +488,8 @@ def build_catalog_dwca(
                 genus = sys.intern(parts[i_gen].strip()) if parts[i_gen] else ""
                 if not genus and species:
                     genus = sys.intern(species.split()[0])
+                if not genus and not species:
+                    continue
                 country = sys.intern((parts[i_country] or parts[i_cc]).strip())
                 occ_lic = sys.intern(parts[i_lic].strip()) if parts[i_lic] else ""
                 ds_key = sys.intern(parts[i_ds].strip()) if parts[i_ds] else ""

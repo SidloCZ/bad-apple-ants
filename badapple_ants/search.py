@@ -13,16 +13,32 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from .ant_gate import MIN_ANT_SCORE, AntGate
+from .catalog import has_genus_or_species
 from .geometry import build_torch_grid, crop_half_extents, max_fit_crop_w, pose_in_bounds
 from .media import extract_clip_frames
 
 ANGLES = [i * (2.0 * math.pi / 16.0) for i in range(16)]
-COARSE_SCALES = (0.94, 0.74, 0.55)
+MIN_FIT_RATIO = 0.65
+MIN_SHARPNESS_RATIO = 0.25
+MAX_CENTER_OFFSET = 0.14
 MIN_PATCH_STD = 10.0
 MIN_FRAME_STD = 2.0
-TOPK_COARSE = 32
-REFINED_CANDIDATES = 16
+TOPK_COARSE = 48
+REFINED_CANDIDATES = 32
 VRAM_CHUNK_IMGS = 4096
+
+
+def _coarse_scales(min_scale: float) -> tuple[float, ...]:
+    """Build 3-level coarse crop scale tuple (or 1 level when >= 0.90) clamped to [0.50, 0.98]."""
+    clamped = min(0.98, max(0.50, float(min_scale)))
+    if clamped >= 0.90:
+        return (clamped,)
+    mid = round(0.5 * (0.94 + clamped), 3)
+    return (0.94, mid, clamped)
+
+
+COARSE_SCALES = _coarse_scales(MIN_FIT_RATIO)
 
 
 def _normalize_rows(x: torch.Tensor, eps: float = 1e-6) -> tuple[torch.Tensor, torch.Tensor]:
@@ -34,7 +50,13 @@ def _normalize_rows(x: torch.Tensor, eps: float = 1e-6) -> tuple[torch.Tensor, t
     return centered / norm, std
 
 
-def _generate_image_poses(img_idx: int, w: int, h: int) -> np.ndarray:
+def _generate_image_poses(
+    img_idx: int,
+    w: int,
+    h: int,
+    scales: tuple[float, ...] = COARSE_SCALES,
+    max_center_offset: float = MAX_CENTER_OFFSET,
+) -> np.ndarray:
     """Generate ant-first candidate poses [img_idx, cx_frac, cy_frac, w_frac, theta, 0.0]."""
     poses: list[tuple[float, float, float, float, float, float]] = []
     wf = float(w)
@@ -43,7 +65,7 @@ def _generate_image_poses(img_idx: int, w: int, h: int) -> np.ndarray:
         cw_max = max_fit_crop_w(wf, hf, theta, margin=0.5)
         if cw_max < 48.0:
             continue
-        for scale in COARSE_SCALES:
+        for scale in scales:
             cw = cw_max * scale
             if cw < 48.0:
                 continue
@@ -59,15 +81,28 @@ def _generate_image_poses(img_idx: int, w: int, h: int) -> np.ndarray:
             py_hi = hf - 0.5 - hy
             if px_hi < px_lo or py_hi < py_lo:
                 continue
+            if 0.0 < max_center_offset < 0.5:
+                px_lo = max(px_lo, wf * (0.5 - max_center_offset))
+                px_hi = min(px_hi, wf * (0.5 + max_center_offset))
+                py_lo = max(py_lo, hf * (0.5 - max_center_offset))
+                py_hi = min(py_hi, hf * (0.5 + max_center_offset))
             xs = (
-                [0.5 * (px_lo + px_hi)]
-                if (px_hi - px_lo) < 4.0
-                else [px_lo, 0.5 * (px_lo + px_hi), px_hi]
+                [0.5 * wf]
+                if px_hi < px_lo
+                else (
+                    [0.5 * (px_lo + px_hi)]
+                    if (px_hi - px_lo) < 4.0
+                    else [px_lo, 0.5 * (px_lo + px_hi), px_hi]
+                )
             )
             ys = (
-                [0.5 * (py_lo + py_hi)]
-                if (py_hi - py_lo) < 4.0
-                else [py_lo, 0.5 * (py_lo + py_hi), py_hi]
+                [0.5 * hf]
+                if py_hi < py_lo
+                else (
+                    [0.5 * (py_lo + py_hi)]
+                    if (py_hi - py_lo) < 4.0
+                    else [py_lo, 0.5 * (py_lo + py_hi), py_hi]
+                )
             )
             for py in ys:
                 cy_frac = py / hf
@@ -90,13 +125,20 @@ def _sample_patches(
     supersample_2x: bool,
     pose_batch: int = 2048,
     img_id_offset: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample poses in mini-batches and return (normalized_patches, std_per_pose)."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sample poses in mini-batches and return (normalized_patches, std_per_pose, sharpness_ratio)."""
     total = poses_gpu.shape[0]
     dim = grid_w * grid_h
     device = poses_gpu.device
     out_patches = torch.empty((total, dim), dtype=torch.float32, device=device)
     out_stds = torch.empty((total,), dtype=torch.float32, device=device)
+    out_sharpness = torch.empty((total,), dtype=torch.float32, device=device)
+
+    lap_kernel = torch.tensor(
+        [[[[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]]]],
+        dtype=torch.float32,
+        device=device,
+    )
 
     sw = grid_w * 2 if supersample_2x else grid_w
     sh = grid_h * 2 if supersample_2x else grid_h
@@ -110,23 +152,29 @@ def _sample_patches(
         grid = build_torch_grid(sub[:, 1:6], w_vec, h_vec, canvas_size, sw, sh)
         imgs = gray_pack[local_ids].float()
         sampled = F.grid_sample(imgs, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+
+        pre_std = sampled.flatten(1).std(dim=-1, unbiased=False)
+        lap_std = F.conv2d(sampled, lap_kernel).flatten(1).std(dim=-1, unbiased=False)
+        out_sharpness[start:end] = lap_std / pre_std.clamp_min(1e-6)
+
         if supersample_2x:
             sampled = F.avg_pool2d(sampled, kernel_size=2, stride=2)
         flat = sampled.view(end - start, dim)
         normed, stds = _normalize_rows(flat)
         out_patches[start:end] = normed
         out_stds[start:end] = stds
-    return out_patches, out_stds
+    return out_patches, out_stds, out_sharpness
 
 
 def _clamp_poses_batch(
     poses: torch.Tensor,
     dims_gpu: torch.Tensor,
     min_w_px: float = 44.0,
-    min_fit_ratio: float = 0.50,
+    min_fit_ratio: float = MIN_FIT_RATIO,
+    max_center_offset: float = MAX_CENTER_OFFSET,
     margin: float = 0.5,
 ) -> torch.Tensor:
-    """Vectorized bounds + ant-first minimum scale clamping on GPU.
+    """Vectorized bounds + ant-first minimum scale and center-offset clamping on GPU.
 
     poses shape: (..., 6) -> [img_idx, cx_frac, cy_frac, w_frac, theta, mirrored]
     """
@@ -151,6 +199,15 @@ def _clamp_poses_batch(
     px_hi = w - margin - hx
     py_lo = margin + hy
     py_hi = h - margin - hy
+    if 0.0 < max_center_offset < 0.5:
+        cx_min = w * (0.5 - max_center_offset)
+        cx_max = w * (0.5 + max_center_offset)
+        cy_min = h * (0.5 - max_center_offset)
+        cy_max = h * (0.5 + max_center_offset)
+        px_lo = torch.minimum(torch.maximum(px_lo, cx_min), 0.5 * w)
+        px_hi = torch.maximum(torch.minimum(px_hi, cx_max), 0.5 * w)
+        py_lo = torch.minimum(torch.maximum(py_lo, cy_min), 0.5 * h)
+        py_hi = torch.maximum(torch.minimum(py_hi, cy_max), 0.5 * h)
 
     px = torch.clamp(poses[..., 1] * w, min=px_lo, max=px_hi)
     py = torch.clamp(poses[..., 2] * h, min=py_lo, max=py_hi)
@@ -171,6 +228,9 @@ def _refine_candidates(
     canvas_size: int,
     rounds: int = 5,
     pose_batch: int = 1024,
+    min_fit_ratio: float = MIN_FIT_RATIO,
+    min_sharpness: float = MIN_SHARPNESS_RATIO,
+    max_center_offset: float = MAX_CENTER_OFFSET,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run 3^4 coordinate-neighborhood refinement at 64x48 on GPU."""
     device = cand_poses.device
@@ -199,7 +259,12 @@ def _refine_candidates(
         deltas[:, 4] = grid_offsets[:, 3] * step_th
 
         expanded = current.unsqueeze(1) + deltas.unsqueeze(0)  # (K, 81, 6)
-        clamped = _clamp_poses_batch(expanded, dims_gpu)
+        clamped = _clamp_poses_batch(
+            expanded,
+            dims_gpu,
+            min_fit_ratio=min_fit_ratio,
+            max_center_offset=max_center_offset,
+        )
         flat_poses = clamped.view(num_cands * 81, 6)
         flat_q_idx = cand_q_idx.unsqueeze(1).expand(num_cands, 81).reshape(-1)
 
@@ -208,7 +273,7 @@ def _refine_candidates(
             end = min(num_cands * 81, start + pose_batch)
             sub_p = flat_poses[start:end]
             sub_q = flat_q_idx[start:end]
-            patches, stds = _sample_patches(
+            patches, stds, sharpness = _sample_patches(
                 gray_pack,
                 dims_gpu,
                 sub_p,
@@ -219,7 +284,8 @@ def _refine_candidates(
                 pose_batch=pose_batch,
             )
             dots = (patches * q64[sub_q]).sum(dim=-1)
-            dots = torch.where(stds >= MIN_PATCH_STD, dots, torch.full_like(dots, -2.0))
+            valid = (stds >= MIN_PATCH_STD) & (sharpness >= min_sharpness)
+            dots = torch.where(valid, dots, torch.full_like(dots, -2.0))
             scores_flat[start:end] = dots
 
         scores_grid = scores_flat.view(num_cands, 81)
@@ -239,6 +305,9 @@ def _refine_chunked(
     cand_qidx_gpu: torch.Tensor,
     canvas_size: int,
     chunk_imgs: int = VRAM_CHUNK_IMGS,
+    min_fit_ratio: float = MIN_FIT_RATIO,
+    min_sharpness: float = MIN_SHARPNESS_RATIO,
+    max_center_offset: float = MAX_CENTER_OFFSET,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Refine top candidates in VRAM-bounded image chunks and evaluate final 32x24 scores."""
     device = cand_poses_gpu.device
@@ -274,8 +343,11 @@ def _refine_chunked(
             canvas_size,
             rounds=5,
             pose_batch=2048,
+            min_fit_ratio=min_fit_ratio,
+            min_sharpness=min_sharpness,
+            max_center_offset=max_center_offset,
         )
-        p32_sub, std32_sub = _sample_patches(
+        p32_sub, std32_sub, sharp32_sub = _sample_patches(
             sub_pack,
             sub_dims,
             ref_sub,
@@ -286,7 +358,8 @@ def _refine_chunked(
             pose_batch=2048,
         )
         s32_sub = (p32_sub * q32[sub_q]).sum(dim=-1)
-        s32_sub = torch.where(std32_sub >= MIN_PATCH_STD, s32_sub, torch.full_like(s32_sub, -2.0))
+        valid32 = (std32_sub >= MIN_PATCH_STD) & (sharp32_sub >= min_sharpness)
+        s32_sub = torch.where(valid32, s32_sub, torch.full_like(s32_sub, -2.0))
 
         ref_sub[:, 0] = orig_ids
         out_poses[cand_idx] = ref_sub
@@ -304,8 +377,13 @@ def run_search(
     duration_s: float = 25.0,
     cooldown: int = 15,
     max_reuse: int = 6,
+    min_scale: float = MIN_FIT_RATIO,
+    min_sharpness: float = MIN_SHARPNESS_RATIO,
+    max_center_offset: float = MAX_CENTER_OFFSET,
+    min_ant_score: float = MIN_ANT_SCORE,
+    max_images: int = 0,
 ) -> dict:
-    """Run coarse 32x24 GPU NCC search, 64x48 refinement, and timeline assignment."""
+    """Run coarse 32x24 GPU NCC search, 64x48 refinement, CLIP ant-presence gate, and timeline assignment."""
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU is required for search")
     device = torch.device("cuda")
@@ -317,6 +395,15 @@ def run_search(
     pack_meta = json.loads((pack_dir / "meta.json").read_text(encoding="utf-8"))
     canvas_size = int(pack_meta["canvas_size"])
     num_images = len(items)
+    if max_images > 0 and max_images < num_images:
+        num_images = max_images
+        dims_np = dims_np[:num_images]
+        items = items[:num_images]
+
+    eligible_mask = np.asarray([has_genus_or_species(it) for it in items], dtype=bool)
+    skipped_family_only = int((~eligible_mask).sum())
+
+    scales = _coarse_scales(min_scale)
 
     frames_u8, clip_meta = extract_clip_frames(video_path, start_s, duration_s, cache_dir)
     n_frames = frames_u8.shape[0]
@@ -347,7 +434,8 @@ def run_search(
 
     print(
         f"search: {n_frames} clip frames -> {m_distinct} distinct "
-        f"({m_tex} textured, {m_distinct - m_tex} solid) against {num_images} images on {torch.cuda.get_device_name(0)}",
+        f"({m_tex} textured, {m_distinct - m_tex} solid) against {num_images - skipped_family_only} eligible images "
+        f"({skipped_family_only} family-only skipped) on {torch.cuda.get_device_name(0)}",
         flush=True,
     )
 
@@ -363,14 +451,15 @@ def run_search(
             img_means[i] = float(patch.mean())
             img_stds[i] = float(patch.std())
 
+    eligible_ids = [i for i in range(num_images) if eligible_mask[i]] or list(range(num_images))
     dark_pool = sorted(
-        [i for i in range(num_images) if img_means[i] < 100.0],
+        [i for i in eligible_ids if img_means[i] < 100.0],
         key=lambda i: img_means[i] + 1.5 * img_stds[i],
-    ) or sorted(range(num_images), key=lambda i: img_means[i])
+    ) or sorted(eligible_ids, key=lambda i: img_means[i])
     bright_pool = sorted(
-        [i for i in range(num_images) if img_means[i] > 155.0],
+        [i for i in eligible_ids if img_means[i] > 155.0],
         key=lambda i: (255.0 - img_means[i]) + 1.5 * img_stds[i],
-    ) or sorted(range(num_images), key=lambda i: -img_means[i])
+    ) or sorted(eligible_ids, key=lambda i: -img_means[i])
 
     # Load dims and queries onto GPU; stream gray_np in VRAM-bounded chunks.
     dims_gpu = torch.from_numpy(dims_np).to(device=device, dtype=torch.int32)
@@ -414,7 +503,15 @@ def run_search(
                 ranges: list[tuple[int, int]] = []
                 cursor = 0
                 for idx in range(img_start, img_end):
-                    arr = _generate_image_poses(idx, int(dims_np[idx, 0]), int(dims_np[idx, 1]))
+                    if not eligible_mask[idx]:
+                        continue
+                    arr = _generate_image_poses(
+                        idx,
+                        int(dims_np[idx, 0]),
+                        int(dims_np[idx, 1]),
+                        scales=scales,
+                        max_center_offset=max_center_offset,
+                    )
                     if arr.shape[0] > 0:
                         pose_chunks.append(arr)
                         ranges.append((cursor, cursor + arr.shape[0]))
@@ -422,7 +519,7 @@ def run_search(
                 pbar.update(img_end - img_start)
                 if pose_chunks:
                     poses_batch_gpu = torch.from_numpy(np.concatenate(pose_chunks, axis=0)).to(device=device)
-                    patches_32, stds = _sample_patches(
+                    patches_32, stds, sharpness = _sample_patches(
                         chunk_pack,
                         chunk_dims,
                         poses_batch_gpu,
@@ -434,7 +531,7 @@ def run_search(
                         img_id_offset=chunk_start,
                     )
                     scores = patches_32 @ q32.T  # (P, 2*M_tex)
-                    invalid = stds < MIN_PATCH_STD
+                    invalid = (stds < MIN_PATCH_STD) | (sharpness < min_sharpness)
                     if invalid.any():
                         scores[invalid] = -2.0
 
@@ -459,7 +556,7 @@ def run_search(
                     acc_poses.clear()
         pbar.close()
 
-        # Merge as-is and mirrored top-32 lists per textured frame, keeping top-16 distinct images.
+        # Merge as-is and mirrored top-48 lists per textured frame, keeping top-32 distinct images.
         top_scores_cpu = top_scores.cpu().numpy()
         top_poses_cpu = top_poses.cpu().numpy()
 
@@ -507,6 +604,9 @@ def run_search(
                 cand_poses_gpu,
                 cand_qidx_gpu,
                 canvas_size,
+                min_fit_ratio=min_scale,
+                min_sharpness=min_sharpness,
+                max_center_offset=max_center_offset,
             )
 
             ref_poses_cpu = ref_poses_gpu.cpu().numpy()
@@ -532,13 +632,37 @@ def run_search(
                 entries.sort(key=lambda e: e["score_64"], reverse=True)
                 refined_per_tex[t_i] = entries
 
-    # Sequential timeline assignment with anti-repetition cooldown and max reuse.
+    ant_gate: AntGate | None = None
+    if min_ant_score > 0.0 and m_tex > 0:
+        ant_gate = AntGate(device=device)
+        pre_cands: list[dict] = []
+        for entries in refined_per_tex:
+            pre_cands.extend(entries[:8])
+        if pre_cands:
+            print(f"ant-gate: scoring top {len(pre_cands)} candidate crops with CLIP...", flush=True)
+            pre_scores = ant_gate.score_candidates(pre_cands, items, cache_dir)
+            for c, sc in zip(pre_cands, pre_scores):
+                c["ant_score"] = sc
+
+    def _get_ant_score(cand: dict) -> float:
+        if ant_gate is None:
+            return 1.0
+        cached_sc = cand.get("ant_score")
+        if cached_sc is not None:
+            return float(cached_sc)
+        sc = ant_gate.score_candidates([cand], items, cache_dir)[0]
+        cand["ant_score"] = sc
+        return sc
+
+    # Sequential timeline assignment with anti-repetition cooldown, max reuse, and CLIP ant-presence gate.
     last_used: dict[int, int] = {}
     use_count: dict[int, int] = {}
     frame_records: list[dict] = []
 
     solid_dark_cursor = 0
     solid_bright_cursor = 0
+    clip_rejected_candidates = 0
+    ant_fallback_frames = 0
 
     for t in range(n_frames):
         d_i = frame_to_distinct[t]
@@ -549,6 +673,7 @@ def run_search(
             frame_records.append(prev)
             continue
 
+        chosen_ant_score: float | None = None
         if is_solid[d_i]:
             is_dark = float(frame_means[d_i]) < 128.0
             pool = dark_pool if is_dark else bright_pool
@@ -575,24 +700,54 @@ def run_search(
             t_i = distinct_to_tex[d_i]
             cands = refined_per_tex[t_i]
             chosen = None
-            for c in cands:
-                im_idx = c["image_idx"]
-                if (t - last_used.get(im_idx, -100000)) >= cooldown and use_count.get(
-                    im_idx, 0
-                ) < max_reuse:
-                    chosen = c
-                    break
-            if chosen is None:
+            if ant_gate is not None:
                 for c in cands:
                     im_idx = c["image_idx"]
-                    if (t - last_used.get(im_idx, -100000)) >= cooldown:
+                    if (t - last_used.get(im_idx, -100000)) >= cooldown and use_count.get(
+                        im_idx, 0
+                    ) < max_reuse:
+                        if _get_ant_score(c) >= min_ant_score:
+                            chosen = c
+                            break
+                        clip_rejected_candidates += 1
+                if chosen is None:
+                    for c in cands:
+                        im_idx = c["image_idx"]
+                        if (t - last_used.get(im_idx, -100000)) >= cooldown:
+                            if _get_ant_score(c) >= min_ant_score:
+                                chosen = c
+                                break
+                if chosen is None:
+                    passing = [c for c in cands if _get_ant_score(c) >= min_ant_score]
+                    if passing:
+                        chosen = max(
+                            passing,
+                            key=lambda c: (t - last_used.get(c["image_idx"], -100000)) * 0.01
+                            + c["score_64"],
+                        )
+                if chosen is None:
+                    ant_fallback_frames += 1
+                    chosen = max(cands, key=lambda c: _get_ant_score(c) + 0.25 * c["score_64"])
+                chosen_ant_score = _get_ant_score(chosen)
+            else:
+                for c in cands:
+                    im_idx = c["image_idx"]
+                    if (t - last_used.get(im_idx, -100000)) >= cooldown and use_count.get(
+                        im_idx, 0
+                    ) < max_reuse:
                         chosen = c
                         break
-            if chosen is None:
-                chosen = max(
-                    cands,
-                    key=lambda c: (t - last_used.get(c["image_idx"], -100000)) * 0.01 + c["score_64"],
-                )
+                if chosen is None:
+                    for c in cands:
+                        im_idx = c["image_idx"]
+                        if (t - last_used.get(im_idx, -100000)) >= cooldown:
+                            chosen = c
+                            break
+                if chosen is None:
+                    chosen = max(
+                        cands,
+                        key=lambda c: (t - last_used.get(c["image_idx"], -100000)) * 0.01 + c["score_64"],
+                    )
             is_solid_flag = False
 
         im_idx = chosen["image_idx"]
@@ -615,6 +770,7 @@ def run_search(
                 },
                 "score_64": chosen["score_64"],
                 "score_32": chosen["score_32"],
+                "ant_score": chosen_ant_score,
                 "item": item,
             }
         )
@@ -627,6 +783,10 @@ def run_search(
             "duration_s": duration_s,
             "cooldown": cooldown,
             "max_reuse": max_reuse,
+            "min_scale": min_scale,
+            "min_sharpness": min_sharpness,
+            "max_center_offset": max_center_offset,
+            "min_ant_score": min_ant_score,
             "indexed_images": num_images,
         },
         "frames": frame_records,
@@ -637,12 +797,17 @@ def run_search(
     tex_frames = [fr for fr in frame_records if not fr["is_solid"]]
     s64_vals = np.asarray([fr["score_64"] for fr in tex_frames], dtype=np.float32)
     s32_vals = np.asarray([fr["score_32"] for fr in tex_frames], dtype=np.float32)
+    ant_vals = np.asarray(
+        [fr["ant_score"] for fr in tex_frames if fr.get("ant_score") is not None],
+        dtype=np.float32,
+    )
     source_counts = Counter(fr["item"]["source"] for fr in frame_records)
     unique_imgs = {fr["item"]["id"] for fr in frame_records}
     unique_species = {fr["item"]["species"] for fr in frame_records if fr["item"].get("species")}
 
     summary = {
         "indexed_thumbnails": num_images,
+        "skipped_family_only": skipped_family_only,
         "clip_frames": n_frames,
         "distinct_frames": m_distinct,
         "textured_distinct_frames": m_tex,
@@ -665,13 +830,28 @@ def run_search(
             "p90": float(np.percentile(s32_vals, 90)) if len(s32_vals) else 0.0,
             "mean": float(s32_vals.mean()) if len(s32_vals) else 0.0,
         },
+        "ant_gate": {
+            "enabled": ant_gate is not None,
+            "min_ant_score": min_ant_score,
+            "min": float(ant_vals.min()) if len(ant_vals) else None,
+            "p10": float(np.percentile(ant_vals, 10)) if len(ant_vals) else None,
+            "median": float(np.median(ant_vals)) if len(ant_vals) else None,
+            "rejected_candidates": clip_rejected_candidates,
+            "fallback_frames": ant_fallback_frames,
+        },
     }
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    ant_msg = (
+        f", ant_gate median={summary['ant_gate']['median']:.3f} "
+        f"(rejected={clip_rejected_candidates}, fallbacks={ant_fallback_frames})"
+        if len(ant_vals)
+        else ""
+    )
     print(
         f"search summary: median NCC(64x48)={summary['ncc_64x48']['median']:.3f}, "
         f"p10={summary['ncc_64x48']['p10']:.3f}, p90={summary['ncc_64x48']['p90']:.3f}, "
-        f"sources={dict(source_counts)}, unique_imgs={len(unique_imgs)}",
+        f"sources={dict(source_counts)}, unique_imgs={len(unique_imgs)}{ant_msg}",
         flush=True,
     )
     return summary

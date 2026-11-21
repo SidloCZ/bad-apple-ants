@@ -19,10 +19,11 @@ Forked from upstream reference repository [`ikuto32/bad-apple-earth-moon`](https
 
 ## 2. Matching Quality & Ant Visibility
 
-- [ ] **Tighter ant-first crop bounds and anti-bokeh filtering**
-  - Prototype visual QA (`still_f0069_best_ncc.png`, `still_f0675_p90.png`) showed that `50-52%` crops on simple diagonal wipes or bright-on-black frames can latch onto out-of-focus background bokeh or stem stripes with no ant visible.
-  - Raise the minimum crop width floor (e.g., `>= 65-75%` of `max_fit_crop_w`) and add a local sharpness / edge-energy check (such as Laplacian variance inside the candidate patch) to reject pure out-of-focus background crops.
-  - Evaluate blending a contour/boundary agreement term with `64x48` NCC (mirroring the `precision` objective in `bad-apple-earth-moon`) so silhouettes stay crisp on the edges.
+- [x] **Tighter ant-first crop bounds and anti-bokeh filtering**
+  - Raised default ant-first crop floor to `65%` (`--min-scale 0.65`, `COARSE_SCALES = (0.94, 0.795, 0.65)`) and added GPU-side `64x48` Laplacian-to-std sharpness filtering (`--min-sharpness 0.25`) in `badapple_ants/search.py` so smooth out-of-focus bokeh (`~0.08`) is rejected while keeping sharp ant silhouettes (`>= 0.48`).
+  - Future option: evaluate blending a contour/boundary agreement term with `64x48` NCC (mirroring the `precision` objective in `bad-apple-earth-moon`) so silhouettes stay crisp on the edges.
+- [x] **Center-anchored crop bounds & GPU CLIP ant-presence gate**
+  - Anchored crops within `±14%` of image center (`--max-center-offset 0.14`), expanded coarse/refined top-K depth (`48`/`32`), and added batched GPU OpenCLIP `ViT-B-32` (`laion2b_s34b_b79k`) ant-presence scoring (`badapple_ants/ant_gate.py`, `--min-ant-score 0.50`) so crops missing ants (empty walls/shadows, flash glare, fingers, labels) are filtered out before timeline selection.
 - [ ] **Curate dark-background ant photography**
   - AntWeb studio specimens naturally cover black-on-white frames, while white-on-black frames depend heavily on iNaturalist macro shots. Deliberately enrich the pool with dark-background ant photos (night flash macros, ants on dark bark/charcoal soil, pale ants/larvae/brood on dark substrates) rather than inverting image colors.
 - [ ] **Tune timeline anti-repetition & continuity**

@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .ant_gate import MIN_ANT_SCORE
 from .catalog import build_catalog, build_catalog_dwca
 from .download import download_thumbs, download_winners
 from .media import fetch_media
 from .render import MAIN_MODES, render_video
-from .search import run_search
+from .search import MAX_CENTER_OFFSET, MIN_FIT_RATIO, MIN_SHARPNESS_RATIO, run_search
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -52,6 +53,11 @@ def main(argv: list[str] | None = None) -> None:
     p_search.add_argument("--duration", type=float, default=25.0)
     p_search.add_argument("--cooldown", type=int, default=15)
     p_search.add_argument("--max-reuse", type=int, default=6)
+    p_search.add_argument("--min-scale", type=float, default=MIN_FIT_RATIO)
+    p_search.add_argument("--min-sharpness", type=float, default=MIN_SHARPNESS_RATIO)
+    p_search.add_argument("--max-center-offset", type=float, default=MAX_CENTER_OFFSET)
+    p_search.add_argument("--min-ant-score", type=float, default=MIN_ANT_SCORE)
+    p_search.add_argument("--max-images", type=int, default=0)
 
     p_win = sub.add_parser("fetch-winners", help="Download full-resolution photos for winning matches")
     p_win.add_argument("--matches", type=Path, default=Path("output/proto/matches.json"))
@@ -76,6 +82,10 @@ def main(argv: list[str] | None = None) -> None:
     p_all.add_argument("--duration", type=float, default=25.0)
     p_all.add_argument("--cooldown", type=int, default=15)
     p_all.add_argument("--max-reuse", type=int, default=6)
+    p_all.add_argument("--min-scale", type=float, default=MIN_FIT_RATIO)
+    p_all.add_argument("--min-sharpness", type=float, default=MIN_SHARPNESS_RATIO)
+    p_all.add_argument("--max-center-offset", type=float, default=MAX_CENTER_OFFSET)
+    p_all.add_argument("--min-ant-score", type=float, default=MIN_ANT_SCORE)
     p_all.add_argument("--main-mode", choices=MAIN_MODES, default="grayscale-stretch")
 
     args = parser.parse_args(argv)
@@ -112,6 +122,11 @@ def main(argv: list[str] | None = None) -> None:
             duration_s=args.duration,
             cooldown=args.cooldown,
             max_reuse=args.max_reuse,
+            min_scale=args.min_scale,
+            min_sharpness=args.min_sharpness,
+            max_center_offset=args.max_center_offset,
+            min_ant_score=args.min_ant_score,
+            max_images=args.max_images,
         )
     elif args.command == "fetch-winners":
         download_winners(args.matches, args.cache, concurrency=args.concurrency)
@@ -138,6 +153,10 @@ def main(argv: list[str] | None = None) -> None:
             duration_s=args.duration,
             cooldown=args.cooldown,
             max_reuse=args.max_reuse,
+            min_scale=args.min_scale,
+            min_sharpness=args.min_sharpness,
+            max_center_offset=args.max_center_offset,
+            min_ant_score=args.min_ant_score,
         )
         download_winners(args.output / "matches.json", args.cache)
         render_video(

@@ -6,8 +6,8 @@ Built as a fork and adaptation of the Moon pipeline (`badapple_moon` and `cuda/m
 
 ## How It Works
 
-1. **Low-resolution catalog & thumbnail pack:** Either queries the GBIF REST API (`taxonKey=4342`, `Formicidae`) or streams a local GBIF Darwin Core Archive (`catalog-dwca`) for species-balanced, derivative-permitting iNaturalist field photos, AntWeb specimen views, Harvard MCZ IIIF images, and Smithsonian NMNH specimens (always excluding labels and `ND` licenses). Downloads lightweight thumbnails into sharded directories and packs proportional `192x192` grayscale tensors into a memory-mapped cache (`cache/pack/`).
-2. **GPU coarse search & refinement:** Runs an ant-first `32x24` normalized cross-correlation (NCC) search on CUDA in VRAM-bounded chunks across 16 rotations, 3 crop scales (`55%–94%` of max fit width), shifts, and horizontal mirroring, followed by 5 rounds of `64x48` coordinate-neighborhood refinement on the top-16 candidates per distinct frame.
+1. **Low-resolution catalog & thumbnail pack:** Either queries the GBIF REST API (`taxonKey=4342`, `Formicidae`) or streams a local GBIF Darwin Core Archive (`catalog-dwca`) for species-balanced, derivative-permitting iNaturalist field photos, AntWeb specimen views, Harvard MCZ IIIF images, and Smithsonian NMNH specimens (requiring genus- or species-level identification to exclude misclassified `Formicidae`-only museum bycatch, and always excluding labels and `ND` licenses). Downloads lightweight thumbnails into sharded directories and packs proportional `192x192` grayscale tensors into a memory-mapped cache (`cache/pack/`).
+2. **GPU coarse search, refinement & CLIP ant-presence gate:** Runs an ant-first `32x24` normalized cross-correlation (NCC) search on CUDA in VRAM-bounded chunks across 16 rotations, 3 crop scales (`65%–94%` of max fit width, `--min-scale`), center-anchored shifts (`--max-center-offset 0.14` keeping crops near the subject center), horizontal mirroring, scale-invariant Laplacian anti-bokeh sharpness filtering (`--min-sharpness 0.25`), and runtime skipping of family-only (`genus == species == ""`) entries, followed by 5 rounds of `64x48` coordinate-neighborhood refinement on the top-32 candidates per distinct frame and an optional GPU OpenCLIP `ViT-B-32` ant-presence gate (`--min-ant-score 0.50`, pass `0` to disable) rejecting empty wall/background crops, flash glare, fingers, and labels.
 3. **Anti-repetition assignment & high-res render:** Selects timeline matches with configurable cooldown and max-reuse limits (`cooldown=15`, `max_reuse=6`), downloads high-resolution originals only for the winning images, and renders a `1280x720` video with original audio, stretched grayscale main panel + color sidebar preview (`--main-mode grayscale-stretch` default, `grayscale`, or `color`), live NCC sparkline, species metadata, and full per-image attributions.
 
 ## Requirements & Setup
@@ -36,7 +36,7 @@ uv run python -m badapple_ants catalog --inat 6500 --antweb 3500
 # Or stream a local GBIF Darwin Core Archive (250k default, or pass higher quotas + --max-per-occ 0 for all views):
 uv run python -m badapple_ants catalog-dwca --inat 150000 --antweb 85000 --mcz 10000 --nmnh 5000
 uv run python -m badapple_ants download-thumbs --concurrency 32
-uv run python -m badapple_ants search --start 25 --duration 25 --cooldown 15 --max-reuse 6
+uv run python -m badapple_ants search --start 25 --duration 25 --cooldown 15 --max-reuse 6 --min-scale 0.65 --min-sharpness 0.25 --max-center-offset 0.14 --min-ant-score 0.50
 uv run python -m badapple_ants fetch-winners
 uv run python -m badapple_ants render --main-mode grayscale-stretch
 ```
@@ -49,10 +49,11 @@ uv run python -m badapple_ants render --main-mode grayscale-stretch
 | `badapple_ants/media.py` | Pinned download & SHA-256 verification for `badapple.mp4` and Noto fonts, plus `30000/1001` fps frame extraction via `imageio-ffmpeg` |
 | `badapple_ants/catalog.py` | GBIF REST API and streaming DwC-A (`catalog-dwca`) catalog builder across iNaturalist, AntWeb, Harvard MCZ, and Smithsonian NMNH (filters labels, `ND`, and `--commercial-only`) |
 | `badapple_ants/download.py` | Per-host throttled async thumbnail downloader (sharded cache), low-RAM memmap `192x192` packer, and high-res winner fetcher |
-| `badapple_ants/search.py` | Memory-mapped / VRAM-chunked CUDA `32x24` NCC coarse search, `64x48` refinement, and cooldown/reuse timeline selector |
+| `badapple_ants/ant_gate.py` | Batched GPU OpenCLIP (`ViT-B-32`) ant-presence gate rejecting empty backgrounds, glare, bokeh, hands, and labels |
+| `badapple_ants/search.py` | Memory-mapped / VRAM-chunked CUDA `32x24` NCC coarse search, Laplacian sharpness & center-offset bounds, `64x48` refinement, CLIP gating, and cooldown/reuse timeline selector |
 | `badapple_ants/render.py` | `1280x720` composite H.264/AAC renderer (with multi-script font fallback), diagnostic still exporter, and `CREDITS.txt` generator |
 | `badapple_ants/__main__.py` | CLI entry point (`python -m badapple_ants`) |
-| `tests/test_geometry.py`, `tests/test_catalog_download.py`, `tests/test_render_fonts.py` | Unit tests for GPU/Pillow alignment, license & label filters, DwC-A import, sharded cache packing, chunked refinement, and font fallback |
+| `tests/test_geometry.py`, `tests/test_catalog_download.py`, `tests/test_render_fonts.py`, `tests/test_search_filters.py` | Unit tests for GPU/Pillow alignment, license & label filters, DwC-A import, sharded cache packing, chunked refinement, font fallback, and anti-bokeh sharpness/scale bounds |
 | `PLANS.md` | Roadmap for grayscale main rendering, flash stabilization, anti-bokeh filtering, and full-video scaling |
 | `assets/`, `cache/`, `output/` | Local downloaded inputs, thumbnail/full-res caches, and rendered prototype outputs (gitignored) |
 

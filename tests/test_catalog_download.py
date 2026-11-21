@@ -214,3 +214,42 @@ def test_worker_pool_circuit_breaker(monkeypatch, tmp_path: Path) -> None:
     assert ok == 0
     assert len(called) < len(pairs)
 
+
+def test_dwca_excludes_family_only_records(tmp_path: Path) -> None:
+    zip_path = tmp_path / "fam.zip"
+    occ_tsv = "\n".join(
+        [
+            "gbifID\tspecies\tgenus\tcountryCode\tlevel0Name\tdecimalLatitude\tdecimalLongitude\tlicense\trecordedBy\tdatasetKey\treferences",
+            "201\t\t\tMG\tMadagascar\t-18.9\t47.5\tCC_BY_4_0\tCollector\tds-aw\thttps://example.org/201",
+            "202\t\tCamponotus\tMG\tMadagascar\t-18.9\t47.5\tCC_BY_4_0\tCollector\tds-aw\thttps://example.org/202",
+            "203\tLasius niger\tLasius\tCZ\tCzechia\t50.0\t14.4\tCC_BY_4_0\tAlice\tds-inat\thttps://example.org/203",
+        ]
+    )
+    mm_tsv = "\n".join(
+        [
+            "gbifID\ttype\tidentifier\treferences\ttitle\tdescription\tcreator\tlicense\trightsHolder",
+            "201\tStillImage\thttps://static.antweb.org/images/casent0838376/casent0838376_p_1_med.jpg\t\t\t\tCollector\tCC BY 4.0\tCAS",
+            "202\tStillImage\thttps://static.antweb.org/images/casent202/casent202_p_1_med.jpg\t\t\t\tCollector\tCC BY 4.0\tCAS",
+            "203\tStillImage\thttps://inaturalist-open-data.s3.amazonaws.com/photos/203/original.jpg\t\t\t\tAlice\tCC BY 4.0\tAlice",
+        ]
+    )
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("occurrence.txt", occ_tsv)
+        zf.writestr("multimedia.txt", mm_tsv)
+
+    cat_path = tmp_path / "filtered.jsonl"
+    stats = build_catalog_dwca(
+        cat_path,
+        zip_path=zip_path,
+        inat_target=5,
+        antweb_target=5,
+        mcz_target=0,
+        nmnh_target=0,
+        fill_remainder=False,
+    )
+    assert stats["total"] == 2
+    ids = {__import__("json").loads(line)["id"] for line in cat_path.read_text(encoding="utf-8").splitlines()}
+    assert "antweb_casent0838376_p_1" not in ids
+    assert "antweb_casent202_p_1" in ids
+    assert "inat_203" in ids
+
