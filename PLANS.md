@@ -32,9 +32,9 @@ Forked from upstream reference repository [`ikuto32/bad-apple-earth-moon`](https
 
 ## 3. Scaling to the Full *Bad Apple!!* Video (`~6,562-6,955` frames)
 
-- [ ] **Bulk dataset ingestion (Darwin Core Archive + full AntWeb)**
-  - Replace the prototype's GBIF REST API paging (`~9,000` items) with a single **GBIF Occurrence Download** (Darwin Core Archive) for Formicidae (`taxonKey=4342`, `mediaType=StillImage`, `1M+` records) plus full non-label AntWeb museum views (`~207k` head/profile/dorsal images).
-  - Target `100,000-250,000` low-res thumbnails (`~3-6 GB` on disk) during search, fetching full-resolution originals only for the `~3,000-6,500` matched winners.
+- [x] **Bulk dataset ingestion (Darwin Core Archive + full AntWeb)**
+  - Added streaming `catalog-dwca` importer in `badapple_ants/catalog.py` (`iNaturalist` + `AntWeb` + `Harvard MCZ` IIIF + `Smithsonian NMNH` thumbnails, species-diverse bounded selection, media-level `ND` exclusion, and `--commercial-only`), sharded/memmap caching in `badapple_ants/download.py`, and VRAM-chunked GPU search in `badapple_ants/search.py`.
+  - Next: generate `250,000`-image catalog, download thumbnails (`~7.7 GB` thumbs + `~9.2 GB` pack), and scale matching to the full video.
 - [ ] **Search throughput & upstream engine evaluation**
   - Evaluate scaling the PyTorch CUDA sharded search vs. adapting the native Rust/CUDA search engine (`cuda/moon/moon.cu`, `rust/moon-search/`) from upstream `ikuto32/bad-apple-earth-moon` with configurable `CUDA_ARCH` and VRAM sharding.
   - Optionally support hardware NVENC (`h264_nvenc` / `hevc_nvenc`) alongside CPU `libx264` for faster full-length 1080p/1440p renders on supported GPUs.

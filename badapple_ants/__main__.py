@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .catalog import build_catalog
+from .catalog import build_catalog, build_catalog_dwca
 from .download import download_thumbs, download_winners
 from .media import fetch_media
 from .render import MAIN_MODES, render_video
@@ -24,11 +24,24 @@ def main(argv: list[str] | None = None) -> None:
     p_cat.add_argument("--inat", type=int, default=6500)
     p_cat.add_argument("--antweb", type=int, default=3500)
 
+    p_dwca = sub.add_parser(
+        "catalog-dwca",
+        help="Build a species-balanced catalog from a local GBIF Darwin Core Archive zip",
+    )
+    p_dwca.add_argument("--zip", type=Path, default=None, dest="zip_path")
+    p_dwca.add_argument("--output", type=Path, default=Path("cache/catalog.jsonl"))
+    p_dwca.add_argument("--inat", type=int, default=150000)
+    p_dwca.add_argument("--antweb", type=int, default=85000)
+    p_dwca.add_argument("--mcz", type=int, default=10000)
+    p_dwca.add_argument("--nmnh", type=int, default=5000)
+    p_dwca.add_argument("--commercial-only", action="store_true")
+    p_dwca.add_argument("--no-fill", action="store_true")
+
     p_dl = sub.add_parser("download-thumbs", help="Download low-res thumbnails and pack search cache")
     p_dl.add_argument("--catalog", type=Path, default=Path("cache/catalog.jsonl"))
     p_dl.add_argument("--cache", type=Path, default=Path("cache"))
     p_dl.add_argument("--canvas-size", type=int, default=192)
-    p_dl.add_argument("--concurrency", type=int, default=24)
+    p_dl.add_argument("--concurrency", type=int, default=32)
 
     p_search = sub.add_parser("search", help="Run GPU NCC search and 64x48 refinement")
     p_search.add_argument("--video", type=Path, default=Path("assets/badapple.mp4"))
@@ -70,6 +83,17 @@ def main(argv: list[str] | None = None) -> None:
         fetch_media(args.assets)
     elif args.command == "catalog":
         build_catalog(args.output, inat_target=args.inat, antweb_target=args.antweb)
+    elif args.command == "catalog-dwca":
+        build_catalog_dwca(
+            args.output,
+            zip_path=args.zip_path,
+            inat_target=args.inat,
+            antweb_target=args.antweb,
+            mcz_target=args.mcz,
+            nmnh_target=args.nmnh,
+            commercial_only=args.commercial_only,
+            fill_remainder=not args.no_fill,
+        )
     elif args.command == "download-thumbs":
         download_thumbs(
             args.catalog,

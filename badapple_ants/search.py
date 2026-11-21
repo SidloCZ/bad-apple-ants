@@ -22,6 +22,7 @@ MIN_PATCH_STD = 10.0
 MIN_FRAME_STD = 2.0
 TOPK_COARSE = 32
 REFINED_CANDIDATES = 16
+VRAM_CHUNK_IMGS = 4096
 
 
 def _normalize_rows(x: torch.Tensor, eps: float = 1e-6) -> tuple[torch.Tensor, torch.Tensor]:
@@ -87,7 +88,8 @@ def _sample_patches(
     grid_w: int,
     grid_h: int,
     supersample_2x: bool,
-    pose_batch: int = 1024,
+    pose_batch: int = 2048,
+    img_id_offset: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Sample poses in mini-batches and return (normalized_patches, std_per_pose)."""
     total = poses_gpu.shape[0]
@@ -102,11 +104,11 @@ def _sample_patches(
     for start in range(0, total, pose_batch):
         end = min(total, start + pose_batch)
         sub = poses_gpu[start:end]
-        img_ids = sub[:, 0].long()
-        w_vec = dims_gpu[img_ids, 0].float()
-        h_vec = dims_gpu[img_ids, 1].float()
+        local_ids = sub[:, 0].long() - img_id_offset
+        w_vec = dims_gpu[local_ids, 0].float()
+        h_vec = dims_gpu[local_ids, 1].float()
         grid = build_torch_grid(sub[:, 1:6], w_vec, h_vec, canvas_size, sw, sh)
-        imgs = gray_pack[img_ids].float()
+        imgs = gray_pack[local_ids].float()
         sampled = F.grid_sample(imgs, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
         if supersample_2x:
             sampled = F.avg_pool2d(sampled, kernel_size=2, stride=2)
@@ -228,6 +230,72 @@ def _refine_candidates(
     return current, best_scores
 
 
+def _refine_chunked(
+    gray_np: np.ndarray,
+    dims_gpu: torch.Tensor,
+    q64: torch.Tensor,
+    q32: torch.Tensor,
+    cand_poses_gpu: torch.Tensor,
+    cand_qidx_gpu: torch.Tensor,
+    canvas_size: int,
+    chunk_imgs: int = VRAM_CHUNK_IMGS,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Refine top candidates in VRAM-bounded image chunks and evaluate final 32x24 scores."""
+    device = cand_poses_gpu.device
+    total_cands = cand_poses_gpu.shape[0]
+    out_poses = torch.empty_like(cand_poses_gpu)
+    out_s64 = torch.full((total_cands,), -2.0, dtype=torch.float32, device=device)
+    out_s32 = torch.full((total_cands,), -2.0, dtype=torch.float32, device=device)
+
+    unique_imgs, inv = torch.unique(cand_poses_gpu[:, 0].long(), sorted=True, return_inverse=True)
+    for c_start in range(0, len(unique_imgs), chunk_imgs):
+        c_end = min(len(unique_imgs), c_start + chunk_imgs)
+        mask = (inv >= c_start) & (inv < c_end)
+        cand_idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
+        chunk_global_ids = unique_imgs[c_start:c_end]
+
+        sub_pack = (
+            torch.from_numpy(np.array(gray_np[chunk_global_ids.cpu().numpy()], copy=True))
+            .unsqueeze(1)
+            .to(device=device, dtype=torch.uint8)
+        )
+        sub_dims = dims_gpu[chunk_global_ids]
+        sub_poses = cand_poses_gpu[cand_idx].clone()
+        orig_ids = sub_poses[:, 0].clone()
+        sub_poses[:, 0] = (inv[cand_idx] - c_start).float()
+        sub_q = cand_qidx_gpu[cand_idx]
+
+        ref_sub, s64_sub = _refine_candidates(
+            sub_pack,
+            sub_dims,
+            q64,
+            sub_poses,
+            sub_q,
+            canvas_size,
+            rounds=5,
+            pose_batch=2048,
+        )
+        p32_sub, std32_sub = _sample_patches(
+            sub_pack,
+            sub_dims,
+            ref_sub,
+            canvas_size,
+            grid_w=32,
+            grid_h=24,
+            supersample_2x=True,
+            pose_batch=2048,
+        )
+        s32_sub = (p32_sub * q32[sub_q]).sum(dim=-1)
+        s32_sub = torch.where(std32_sub >= MIN_PATCH_STD, s32_sub, torch.full_like(s32_sub, -2.0))
+
+        ref_sub[:, 0] = orig_ids
+        out_poses[cand_idx] = ref_sub
+        out_s64[cand_idx] = s64_sub
+        out_s32[cand_idx] = s32_sub
+
+    return out_poses, out_s64, out_s32
+
+
 def run_search(
     video_path: Path,
     cache_dir: Path,
@@ -243,7 +311,7 @@ def run_search(
     device = torch.device("cuda")
 
     pack_dir = cache_dir / "pack"
-    gray_np = np.load(pack_dir / "gray.npy")
+    gray_np = np.load(pack_dir / "gray.npy", mmap_mode="r")
     dims_np = np.load(pack_dir / "dims.npy")
     items = json.loads((pack_dir / "items.json").read_text(encoding="utf-8"))
     pack_meta = json.loads((pack_dir / "meta.json").read_text(encoding="utf-8"))
@@ -283,14 +351,17 @@ def run_search(
         flush=True,
     )
 
-    # Compute image-level stats on real pixels [0:h, 0:w] for solid fallback frames.
+    # Compute image-level stats in chunks on real pixels [0:h, 0:w] for solid fallback frames.
     img_means = np.empty((num_images,), dtype=np.float32)
     img_stds = np.empty((num_images,), dtype=np.float32)
-    for i in range(num_images):
-        w, h = int(dims_np[i, 0]), int(dims_np[i, 1])
-        patch = gray_np[i, :h, :w]
-        img_means[i] = float(patch.mean())
-        img_stds[i] = float(patch.std())
+    for s in range(0, num_images, VRAM_CHUNK_IMGS):
+        e = min(num_images, s + VRAM_CHUNK_IMGS)
+        block = np.asarray(gray_np[s:e])
+        for offset_i, i in enumerate(range(s, e)):
+            w, h = int(dims_np[i, 0]), int(dims_np[i, 1])
+            patch = block[offset_i, :h, :w]
+            img_means[i] = float(patch.mean())
+            img_stds[i] = float(patch.std())
 
     dark_pool = sorted(
         [i for i in range(num_images) if img_means[i] < 100.0],
@@ -301,8 +372,7 @@ def run_search(
         key=lambda i: (255.0 - img_means[i]) + 1.5 * img_stds[i],
     ) or sorted(range(num_images), key=lambda i: -img_means[i])
 
-    # Load packed thumbnails and queries onto GPU.
-    gray_pack = torch.from_numpy(gray_np).unsqueeze(1).to(device=device, dtype=torch.uint8)
+    # Load dims and queries onto GPU; stream gray_np in VRAM-bounded chunks.
     dims_gpu = torch.from_numpy(dims_np).to(device=device, dtype=torch.int32)
 
     refined_per_tex: list[list[dict]] = [[] for _ in range(m_tex)]
@@ -327,56 +397,67 @@ def run_search(
         acc_scores: list[torch.Tensor] = []
         acc_poses: list[torch.Tensor] = []
 
-        batch_imgs = 16
-        for img_start in tqdm(range(0, num_images, batch_imgs), desc="coarse-32x24", unit="batch"):
-            img_end = min(num_images, img_start + batch_imgs)
-            pose_chunks: list[np.ndarray] = []
-            ranges: list[tuple[int, int]] = []
-            cursor = 0
-            for idx in range(img_start, img_end):
-                arr = _generate_image_poses(idx, int(dims_np[idx, 0]), int(dims_np[idx, 1]))
-                if arr.shape[0] > 0:
-                    pose_chunks.append(arr)
-                    ranges.append((cursor, cursor + arr.shape[0]))
-                    cursor += arr.shape[0]
-            if not pose_chunks:
-                continue
-
-            poses_batch_gpu = torch.from_numpy(np.concatenate(pose_chunks, axis=0)).to(device=device)
-            patches_32, stds = _sample_patches(
-                gray_pack,
-                dims_gpu,
-                poses_batch_gpu,
-                canvas_size,
-                grid_w=32,
-                grid_h=24,
-                supersample_2x=True,
-                pose_batch=1024,
+        batch_imgs = 32
+        pbar = tqdm(total=num_images, desc="coarse-32x24", unit="img")
+        for chunk_start in range(0, num_images, VRAM_CHUNK_IMGS):
+            chunk_end = min(num_images, chunk_start + VRAM_CHUNK_IMGS)
+            chunk_pack = (
+                torch.from_numpy(np.array(gray_np[chunk_start:chunk_end], copy=True))
+                .unsqueeze(1)
+                .to(device=device, dtype=torch.uint8)
             )
-            scores = patches_32 @ q32.T  # (P, 2*M_tex)
-            invalid = stds < MIN_PATCH_STD
-            if invalid.any():
-                scores[invalid] = -2.0
+            chunk_dims = dims_gpu[chunk_start:chunk_end]
 
-            batch_best_scores = torch.empty((len(ranges), num_q), dtype=torch.float32, device=device)
-            batch_best_poses = torch.empty((len(ranges), num_q, 6), dtype=torch.float32, device=device)
-            for r_i, (s, e) in enumerate(ranges):
-                best_v, best_loc = scores[s:e].max(dim=0)
-                batch_best_scores[r_i] = best_v
-                batch_best_poses[r_i] = poses_batch_gpu[s + best_loc]
+            for img_start in range(chunk_start, chunk_end, batch_imgs):
+                img_end = min(chunk_end, img_start + batch_imgs)
+                pose_chunks: list[np.ndarray] = []
+                ranges: list[tuple[int, int]] = []
+                cursor = 0
+                for idx in range(img_start, img_end):
+                    arr = _generate_image_poses(idx, int(dims_np[idx, 0]), int(dims_np[idx, 1]))
+                    if arr.shape[0] > 0:
+                        pose_chunks.append(arr)
+                        ranges.append((cursor, cursor + arr.shape[0]))
+                        cursor += arr.shape[0]
+                pbar.update(img_end - img_start)
+                if pose_chunks:
+                    poses_batch_gpu = torch.from_numpy(np.concatenate(pose_chunks, axis=0)).to(device=device)
+                    patches_32, stds = _sample_patches(
+                        chunk_pack,
+                        chunk_dims,
+                        poses_batch_gpu,
+                        canvas_size,
+                        grid_w=32,
+                        grid_h=24,
+                        supersample_2x=True,
+                        pose_batch=2048,
+                        img_id_offset=chunk_start,
+                    )
+                    scores = patches_32 @ q32.T  # (P, 2*M_tex)
+                    invalid = stds < MIN_PATCH_STD
+                    if invalid.any():
+                        scores[invalid] = -2.0
 
-            acc_scores.append(batch_best_scores)
-            acc_poses.append(batch_best_poses)
+                    batch_best_scores = torch.empty((len(ranges), num_q), dtype=torch.float32, device=device)
+                    batch_best_poses = torch.empty((len(ranges), num_q, 6), dtype=torch.float32, device=device)
+                    for r_i, (s, e) in enumerate(ranges):
+                        best_v, best_loc = scores[s:e].max(dim=0)
+                        batch_best_scores[r_i] = best_v
+                        batch_best_poses[r_i] = poses_batch_gpu[s + best_loc]
 
-            if len(acc_scores) >= 8 or img_end == num_images:
-                cand_s = torch.cat([top_scores, *acc_scores], dim=0)
-                cand_p = torch.cat([top_poses, *acc_poses], dim=0)
-                new_scores, new_idx = torch.topk(cand_s, k=TOPK_COARSE, dim=0)
-                q_arange = torch.arange(num_q, device=device).unsqueeze(0).expand(TOPK_COARSE, num_q)
-                top_scores = new_scores
-                top_poses = cand_p[new_idx, q_arange]
-                acc_scores.clear()
-                acc_poses.clear()
+                    acc_scores.append(batch_best_scores)
+                    acc_poses.append(batch_best_poses)
+
+                if acc_scores and (len(acc_scores) >= 8 or img_end == num_images):
+                    cand_s = torch.cat([top_scores, *acc_scores], dim=0)
+                    cand_p = torch.cat([top_poses, *acc_poses], dim=0)
+                    new_scores, new_idx = torch.topk(cand_s, k=TOPK_COARSE, dim=0)
+                    q_arange = torch.arange(num_q, device=device).unsqueeze(0).expand(TOPK_COARSE, num_q)
+                    top_scores = new_scores
+                    top_poses = cand_p[new_idx, q_arange]
+                    acc_scores.clear()
+                    acc_poses.clear()
+        pbar.close()
 
         # Merge as-is and mirrored top-32 lists per textured frame, keeping top-16 distinct images.
         top_scores_cpu = top_scores.cpu().numpy()
@@ -418,29 +499,15 @@ def run_search(
             cand_poses_gpu = torch.from_numpy(np.stack(cand_list_poses, axis=0)).to(device=device)
             cand_qidx_gpu = torch.tensor(cand_list_qidx, dtype=torch.long, device=device)
             print(f"refining {cand_poses_gpu.shape[0]} candidates at 64x48...", flush=True)
-            ref_poses_gpu, ref_scores_gpu = _refine_candidates(
-                gray_pack,
+            ref_poses_gpu, ref_scores_gpu, ref_s32 = _refine_chunked(
+                gray_np,
                 dims_gpu,
                 q64,
+                q32,
                 cand_poses_gpu,
                 cand_qidx_gpu,
                 canvas_size,
-                rounds=5,
-                pose_batch=1024,
             )
-            # Also evaluate final 32x24 score of refined poses for transparency.
-            patches_ref_32, stds_ref_32 = _sample_patches(
-                gray_pack,
-                dims_gpu,
-                ref_poses_gpu,
-                canvas_size,
-                grid_w=32,
-                grid_h=24,
-                supersample_2x=True,
-                pose_batch=1024,
-            )
-            ref_s32 = (patches_ref_32 * q32[cand_qidx_gpu]).sum(dim=-1)
-            ref_s32 = torch.where(stds_ref_32 >= MIN_PATCH_STD, ref_s32, torch.full_like(ref_s32, -2.0))
 
             ref_poses_cpu = ref_poses_gpu.cpu().numpy()
             ref_s64_cpu = ref_scores_gpu.cpu().numpy()

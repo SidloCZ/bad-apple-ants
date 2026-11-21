@@ -38,28 +38,162 @@ def _stretch_grayscale(gray_img: Image.Image, low_pct: float = 1.0, high_pct: fl
     return Image.fromarray(stretched, mode="L")
 
 
+_FALLBACK_FONT_PATHS = (
+    "NotoSansCJK-Regular.ttc",
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/msjh.ttc",
+    "C:/Windows/Fonts/YuGothR.ttc",
+    "C:/Windows/Fonts/malgun.ttf",
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/Nirmala.ttc",
+    "C:/Windows/Fonts/LeelawUI.ttf",
+    "C:/Windows/Fonts/seguisym.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+)
+
+
+class FontChain:
+    """Ordered font list supporting per-character script fallback for non-Latin names."""
+
+    def __init__(self, fonts: list[ImageFont.ImageFont]):
+        self.fonts = fonts
+        self._notdef_sigs: dict[int, tuple[tuple[int, int], bytes] | None] = {}
+        self._char_cache: dict[str, ImageFont.ImageFont] = {}
+
+    @classmethod
+    def load(cls, assets_dir: Path, filename: str, size: int) -> FontChain:
+        fonts: list[ImageFont.ImageFont] = []
+        seen: set[Path] = set()
+
+        def add_path(p: Path) -> None:
+            try:
+                resolved = p.resolve()
+            except OSError:
+                resolved = p
+            if resolved in seen or not p.is_file():
+                return
+            try:
+                fonts.append(ImageFont.truetype(str(p), size))
+                seen.add(resolved)
+            except OSError:
+                pass
+
+        add_path(assets_dir / "fonts" / filename)
+        if "Mono" in filename:
+            add_path(Path("C:/Windows/Fonts/consola.ttf"))
+        for rel_or_abs in _FALLBACK_FONT_PATHS:
+            p = Path(rel_or_abs)
+            if not p.is_absolute():
+                p = assets_dir / "fonts" / p
+            add_path(p)
+
+        if not fonts:
+            fonts.append(ImageFont.load_default(size=size))
+        return cls(fonts)
+
+    def _has_glyph(self, font: ImageFont.ImageFont, ch: str) -> bool:
+        if ch.isspace():
+            return True
+        if not isinstance(font, ImageFont.FreeTypeFont):
+            return True
+        fid = id(font)
+        if fid not in self._notdef_sigs:
+            try:
+                m_nd = font.getmask("\ufffe")
+                self._notdef_sigs[fid] = (m_nd.size, bytes(m_nd))
+            except Exception:
+                self._notdef_sigs[fid] = None
+        nd_sig = self._notdef_sigs[fid]
+        if nd_sig is None:
+            return True
+        try:
+            m = font.getmask(ch)
+            return (m.size, bytes(m)) != nd_sig
+        except Exception:
+            return False
+
+    def resolve(self, ch: str) -> ImageFont.ImageFont:
+        cached = self._char_cache.get(ch)
+        if cached is not None:
+            return cached
+        chosen = self.fonts[0]
+        for font in self.fonts:
+            if self._has_glyph(font, ch):
+                chosen = font
+                break
+        self._char_cache[ch] = chosen
+        return chosen
+
+    def runs(self, text: str) -> list[tuple[str, ImageFont.ImageFont]]:
+        if not text:
+            return []
+        out: list[tuple[str, ImageFont.ImageFont]] = []
+        cur_font = self.resolve(text[0])
+        buf = [text[0]]
+        for ch in text[1:]:
+            f = self.resolve(ch)
+            if f is cur_font:
+                buf.append(ch)
+            else:
+                out.append(("".join(buf), cur_font))
+                cur_font = f
+                buf = [ch]
+        out.append(("".join(buf), cur_font))
+        return out
+
+    def textlength(self, draw: ImageDraw.ImageDraw, text: str) -> float:
+        return sum(float(draw.textlength(chunk, font=f)) for chunk, f in self.runs(text))
+
+    def truncate(self, draw: ImageDraw.ImageDraw, text: str, max_w: int) -> str:
+        if self.textlength(draw, text) <= max_w:
+            return text
+        suffix = "..."
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.textlength(draw, text[:mid] + suffix) <= max_w:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + suffix
+
+    def draw_text(
+        self,
+        draw: ImageDraw.ImageDraw,
+        xy: tuple[int, int],
+        text: str,
+        fill: tuple[int, int, int],
+    ) -> None:
+        x, y = float(xy[0]), float(xy[1])
+        primary = self.fonts[0]
+        runs = self.runs(text)
+        if len(runs) == 1 and runs[0][1] is primary:
+            draw.text((x, y), text, fill=fill, font=primary)
+            return
+        if isinstance(primary, ImageFont.FreeTypeFont):
+            ascent, _ = primary.getmetrics()
+            baseline_y = y + float(ascent)
+            for chunk, f in runs:
+                anchor = "ls" if isinstance(f, ImageFont.FreeTypeFont) else None
+                draw.text((x, baseline_y if anchor else y), chunk, fill=fill, font=f, anchor=anchor)
+                x += float(draw.textlength(chunk, font=f))
+        else:
+            for chunk, f in runs:
+                draw.text((x, y), chunk, fill=fill, font=f)
+                x += float(draw.textlength(chunk, font=f))
+
+
 def _load_font(assets_dir: Path, filename: str, size: int) -> ImageFont.ImageFont:
-    font_path = assets_dir / "fonts" / filename
-    if font_path.is_file():
-        return ImageFont.truetype(str(font_path), size)
-    fallback = Path("C:/Windows/Fonts/consola.ttf" if "Mono" in filename else "C:/Windows/Fonts/arial.ttf")
-    if fallback.is_file():
-        return ImageFont.truetype(str(fallback), size)
-    return ImageFont.load_default(size=size)
+    return FontChain.load(assets_dir, filename, size).fonts[0]
 
 
 def _truncate_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_w: int) -> str:
-    if draw.textlength(text, font=font) <= max_w:
-        return text
-    suffix = "..."
-    lo, hi = 0, len(text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if draw.textlength(text[:mid] + suffix, font=font) <= max_w:
-            lo = mid
-        else:
-            hi = mid - 1
-    return text[:lo] + suffix
+    return FontChain([font]).truncate(draw, text, max_w)
 
 
 def _format_taxon(item: dict) -> str:
@@ -79,6 +213,10 @@ def _format_source(item: dict) -> str:
         return "Source: iNaturalist (live photo)"
     if src == "antweb":
         return f"Source: AntWeb ({view})" if view else "Source: AntWeb"
+    if src == "mcz":
+        return f"Source: Harvard MCZ ({view})" if view else "Source: Harvard MCZ"
+    if src == "nmnh":
+        return f"Source: Smithsonian NMNH ({view})" if view else "Source: Smithsonian NMNH"
     return f"Source: {src}"
 
 
@@ -118,7 +256,7 @@ def _write_credits(frames: list[dict], out_path: Path) -> None:
         f"Unique ant photographs used: {len(seen)}",
         "",
         "Source video and music: Bad Apple!! (Alstroemeria Records / ZUN / Anira shadow PV).",
-        "Data sources: GBIF occurrences from iNaturalist Research-Grade and AntWeb (California Academy of Sciences).",
+        "Data sources: GBIF occurrences (iNaturalist Research-Grade, AntWeb / CAS, Harvard MCZ, Smithsonian NMNH).",
         "GBIF Download Citation: GBIF.org (20 November 2026) GBIF Occurrence Download https://doi.org/10.15468/dl.dyc97c",
         "",
         "Per-image attributions (sorted by frame count):",
@@ -166,8 +304,8 @@ def render_video(
         )
 
     font_label = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 12)
-    font_taxon = _load_font(assets_dir, "NotoSans-Regular.ttf", 15)
-    font_meta = _load_font(assets_dir, "NotoSans-Regular.ttf", 12)
+    font_taxon = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 15)
+    font_meta = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 12)
     font_stats = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 11)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -351,22 +489,22 @@ def render_video(
                 rot_deg = int(round(math.degrees(float(pose["theta"])))) % 360
                 mir_tag = " MIR" if pose["mirrored"] else ""
 
-                taxon_txt = _truncate_text(draw, _format_taxon(item), font_taxon, PREV_W)
-                source_txt = _truncate_text(draw, _format_source(item), font_meta, PREV_W)
-                country_txt = _truncate_text(
-                    draw, f"Location: {item.get('country') or 'Unknown'}", font_meta, PREV_W
+                taxon_txt = font_taxon.truncate(draw, _format_taxon(item), PREV_W)
+                source_txt = font_meta.truncate(draw, _format_source(item), PREV_W)
+                country_txt = font_meta.truncate(
+                    draw, f"Location: {item.get('country') or 'Unknown'}", PREV_W
                 )
                 creator = item.get("creator") or "Unknown"
                 lic = item.get("license") or "Unknown"
-                credit_txt = _truncate_text(draw, f"{creator} | {lic}", font_meta, PREV_W)
+                credit_txt = font_meta.truncate(draw, f"{creator} | {lic}", PREV_W)
                 stats_txt = (
                     f"SCALE {scale_pct:3d}%  ROT {rot_deg:3d}d{mir_tag}  F {t + 1:03d}/{n}"
                 )
 
-                draw.text((x0, 592), taxon_txt, fill=(243, 244, 246), font=font_taxon)
-                draw.text((x0, 616), source_txt, fill=(209, 213, 219), font=font_meta)
-                draw.text((x0, 636), country_txt, fill=(156, 163, 175), font=font_meta)
-                draw.text((x0, 656), credit_txt, fill=(156, 163, 175), font=font_meta)
+                font_taxon.draw_text(draw, (x0, 592), taxon_txt, fill=(243, 244, 246))
+                font_meta.draw_text(draw, (x0, 616), source_txt, fill=(209, 213, 219))
+                font_meta.draw_text(draw, (x0, 636), country_txt, fill=(156, 163, 175))
+                font_meta.draw_text(draw, (x0, 656), credit_txt, fill=(156, 163, 175))
                 draw.text((x0, 682), stats_txt, fill=(250, 204, 21), font=font_stats)
 
                 if t in still_targets:
