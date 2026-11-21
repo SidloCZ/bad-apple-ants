@@ -115,6 +115,140 @@ def _generate_image_poses(
     return np.asarray(poses, dtype=np.float32)
 
 
+def _laplacian_kernel(device: torch.device) -> torch.Tensor:
+    """Return the 3x3 4-neighbor discrete Laplacian convolution kernel on `device`."""
+    return torch.tensor(
+        [[[[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]]]],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _generate_poses_batch_gpu(
+    img_ids_gpu: torch.Tensor,
+    dims_batch_gpu: torch.Tensor,
+    scales: tuple[float, ...],
+    max_center_offset: float = MAX_CENTER_OFFSET,
+    eligible_batch: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized GPU equivalent of _generate_image_poses returning (poses_bp, valid_bp)."""
+    device = dims_batch_gpu.device
+    B = dims_batch_gpu.shape[0]
+    wf = dims_batch_gpu[:, 0].float().unsqueeze(1)  # (B, 1)
+    hf = dims_batch_gpu[:, 1].float().unsqueeze(1)  # (B, 1)
+
+    angles = torch.tensor(ANGLES, dtype=torch.float32, device=device)  # (16,)
+    theta = angles.unsqueeze(0).expand(B, 16)  # (B, 16)
+    cos_a = torch.abs(torch.cos(theta))
+    sin_a = torch.abs(torch.sin(theta))
+
+    avail_w = torch.clamp(wf - 1.0, min=0.0)
+    avail_h = torch.clamp(hf - 1.0, min=0.0)
+    cw_max = torch.minimum(avail_w / (cos_a + 0.75 * sin_a), avail_h / (sin_a + 0.75 * cos_a))
+
+    img_col = img_ids_gpu.float().view(B, 1)
+    eps = 1e-4
+
+    pose_parts: list[torch.Tensor] = []
+    mask_parts: list[torch.Tensor] = []
+
+    for scale in scales:
+        cw = cw_max * float(scale)
+        ok_size = (cw_max >= 48.0) & (cw >= 48.0)
+        w_frac = cw / wf
+        ch = 0.75 * cw
+        hx = 0.5 * cw * cos_a + 0.5 * ch * sin_a
+        hy = 0.5 * cw * sin_a + 0.5 * ch * cos_a
+
+        if scale >= 0.90:
+            px = 0.5 * wf
+            py = 0.5 * hf
+            in_bounds = (
+                (px - hx >= 0.5 - eps)
+                & (px + hx <= wf - 0.5 + eps)
+                & (py - hy >= 0.5 - eps)
+                & (py + hy <= hf - 0.5 + eps)
+            )
+            poses_s = torch.stack(
+                [
+                    img_col.expand(B, 16),
+                    torch.full((B, 16), 0.5, dtype=torch.float32, device=device),
+                    torch.full((B, 16), 0.5, dtype=torch.float32, device=device),
+                    w_frac,
+                    theta,
+                    torch.zeros((B, 16), dtype=torch.float32, device=device),
+                ],
+                dim=-1,
+            )
+            pose_parts.append(poses_s)
+            mask_parts.append(ok_size & in_bounds)
+            continue
+
+        px_lo = 0.5 + hx
+        px_hi = wf - 0.5 - hx
+        py_lo = 0.5 + hy
+        py_hi = hf - 0.5 - hy
+        base_ok = ok_size & (px_hi >= px_lo) & (py_hi >= py_lo)
+
+        if 0.0 < max_center_offset < 0.5:
+            px_lo = torch.maximum(px_lo, wf * (0.5 - max_center_offset))
+            px_hi = torch.minimum(px_hi, wf * (0.5 + max_center_offset))
+            py_lo = torch.maximum(py_lo, hf * (0.5 - max_center_offset))
+            py_hi = torch.minimum(py_hi, hf * (0.5 + max_center_offset))
+
+        x_inv = px_hi < px_lo
+        px_mid = torch.where(x_inv, 0.5 * wf, 0.5 * (px_lo + px_hi))
+        x_use_ends = (~x_inv) & ((px_hi - px_lo) >= 4.0)
+        xs_vals = torch.stack((px_lo, px_mid, px_hi), dim=-1)  # (B, 16, 3)
+        ones_x = torch.ones_like(x_use_ends)
+        xs_mask = torch.stack((x_use_ends, ones_x, x_use_ends), dim=-1)  # (B, 16, 3)
+
+        y_inv = py_hi < py_lo
+        py_mid = torch.where(y_inv, 0.5 * hf, 0.5 * (py_lo + py_hi))
+        y_use_ends = (~y_inv) & ((py_hi - py_lo) >= 4.0)
+        ys_vals = torch.stack((py_lo, py_mid, py_hi), dim=-1)  # (B, 16, 3)
+        ys_mask = torch.stack((y_use_ends, ones_x, y_use_ends), dim=-1)  # (B, 16, 3)
+
+        px_grid = xs_vals.unsqueeze(2).expand(B, 16, 3, 3)
+        py_grid = ys_vals.unsqueeze(3).expand(B, 16, 3, 3)
+        hx_g = hx[:, :, None, None]
+        hy_g = hy[:, :, None, None]
+        wf_g = wf[:, :, None, None]
+        hf_g = hf[:, :, None, None]
+
+        in_bounds = (
+            (px_grid - hx_g >= 0.5 - eps)
+            & (px_grid + hx_g <= wf_g - 0.5 + eps)
+            & (py_grid - hy_g >= 0.5 - eps)
+            & (py_grid + hy_g <= hf_g - 0.5 + eps)
+        )
+        grid_mask = (
+            base_ok[:, :, None, None]
+            & xs_mask.unsqueeze(2)
+            & ys_mask.unsqueeze(3)
+            & in_bounds
+        )
+
+        cx_flat = (px_grid / wf_g).reshape(B, 144)
+        cy_flat = (py_grid / hf_g).reshape(B, 144)
+        wf_flat = w_frac.unsqueeze(-1).expand(B, 16, 9).reshape(B, 144)
+        th_flat = theta.unsqueeze(-1).expand(B, 16, 9).reshape(B, 144)
+        zeros_flat = torch.zeros((B, 144), dtype=torch.float32, device=device)
+
+        poses_s = torch.stack(
+            [img_col.expand(B, 144), cx_flat, cy_flat, wf_flat, th_flat, zeros_flat],
+            dim=-1,
+        )
+        pose_parts.append(poses_s)
+        mask_parts.append(grid_mask.reshape(B, 144))
+
+    poses_bp = torch.cat(pose_parts, dim=1)
+    valid_bp = torch.cat(mask_parts, dim=1)
+    if eligible_batch is not None:
+        valid_bp = valid_bp & eligible_batch.bool().unsqueeze(1)
+    return poses_bp, valid_bp
+
+
 def _sample_patches(
     gray_pack: torch.Tensor,
     dims_gpu: torch.Tensor,
@@ -134,11 +268,7 @@ def _sample_patches(
     out_stds = torch.empty((total,), dtype=torch.float32, device=device)
     out_sharpness = torch.empty((total,), dtype=torch.float32, device=device)
 
-    lap_kernel = torch.tensor(
-        [[[[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]]]],
-        dtype=torch.float32,
-        device=device,
-    )
+    lap_kernel = _laplacian_kernel(device)
 
     sw = grid_w * 2 if supersample_2x else grid_w
     sh = grid_h * 2 if supersample_2x else grid_h
@@ -163,6 +293,62 @@ def _sample_patches(
         normed, stds = _normalize_rows(flat)
         out_patches[start:end] = normed
         out_stds[start:end] = stds
+    return out_patches, out_stds, out_sharpness
+
+
+def _sample_patches_grouped(
+    imgs_batch_f32: torch.Tensor,
+    dims_batch_f32: torch.Tensor,
+    poses_bp: torch.Tensor,
+    canvas_size: int,
+    grid_w: int,
+    grid_h: int,
+    supersample_2x: bool,
+    lap_kernel: torch.Tensor,
+    pose_chunk: int = 160,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Zero-copy grouped sampling: sample P poses per image without duplicating image tensors."""
+    B, P, _ = poses_bp.shape
+    dim = grid_w * grid_h
+    device = poses_bp.device
+
+    out_patches = torch.empty((B, P, dim), dtype=torch.float32, device=device)
+    out_stds = torch.empty((B, P), dtype=torch.float32, device=device)
+    out_sharpness = torch.empty((B, P), dtype=torch.float32, device=device)
+
+    sw = grid_w * 2 if supersample_2x else grid_w
+    sh = grid_h * 2 if supersample_2x else grid_h
+
+    w_base = dims_batch_f32[:, 0].view(B, 1)
+    h_base = dims_batch_f32[:, 1].view(B, 1)
+
+    for p0 in range(0, P, pose_chunk):
+        p1 = min(P, p0 + pose_chunk)
+        p_len = p1 - p0
+        sub = poses_bp[:, p0:p1, 1:6].reshape(B * p_len, 5)
+        w_exp = w_base.expand(B, p_len).reshape(B * p_len)
+        h_exp = h_base.expand(B, p_len).reshape(B * p_len)
+        grid = build_torch_grid(sub, w_exp, h_exp, canvas_size, sw, sh).view(B, p_len * sh, sw, 2)
+
+        sampled = F.grid_sample(
+            imgs_batch_f32,
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
+        ).view(B * p_len, 1, sh, sw)
+
+        pre_std = sampled.flatten(1).std(dim=-1, unbiased=False)
+        lap_std = F.conv2d(sampled, lap_kernel).flatten(1).std(dim=-1, unbiased=False)
+        out_sharpness[:, p0:p1] = (lap_std / pre_std.clamp_min(1e-6)).view(B, p_len)
+
+        if supersample_2x:
+            sampled = F.avg_pool2d(sampled, kernel_size=2, stride=2)
+        flat = sampled.view(B * p_len, dim)
+        normed, stds = _normalize_rows(flat)
+        out_patches[:, p0:p1] = normed.view(B, p_len, dim)
+        out_stds[:, p0:p1] = stds.view(B, p_len)
+
     return out_patches, out_stds, out_sharpness
 
 
@@ -439,27 +625,30 @@ def run_search(
         flush=True,
     )
 
-    # Compute image-level stats in chunks on real pixels [0:h, 0:w] for solid fallback frames.
-    img_means = np.empty((num_images,), dtype=np.float32)
-    img_stds = np.empty((num_images,), dtype=np.float32)
-    for s in range(0, num_images, VRAM_CHUNK_IMGS):
-        e = min(num_images, s + VRAM_CHUNK_IMGS)
-        block = np.asarray(gray_np[s:e])
-        for offset_i, i in enumerate(range(s, e)):
-            w, h = int(dims_np[i, 0]), int(dims_np[i, 1])
-            patch = block[offset_i, :h, :w]
-            img_means[i] = float(patch.mean())
-            img_stds[i] = float(patch.std())
+    dark_pool: list[int] = []
+    bright_pool: list[int] = []
+    if bool(is_solid.any()):
+        # Compute image-level stats in chunks on real pixels [0:h, 0:w] for solid fallback frames.
+        img_means = np.empty((num_images,), dtype=np.float32)
+        img_stds = np.empty((num_images,), dtype=np.float32)
+        for s in range(0, num_images, VRAM_CHUNK_IMGS):
+            e = min(num_images, s + VRAM_CHUNK_IMGS)
+            block = np.asarray(gray_np[s:e])
+            for offset_i, i in enumerate(range(s, e)):
+                w, h = int(dims_np[i, 0]), int(dims_np[i, 1])
+                patch = block[offset_i, :h, :w]
+                img_means[i] = float(patch.mean())
+                img_stds[i] = float(patch.std())
 
-    eligible_ids = [i for i in range(num_images) if eligible_mask[i]] or list(range(num_images))
-    dark_pool = sorted(
-        [i for i in eligible_ids if img_means[i] < 100.0],
-        key=lambda i: img_means[i] + 1.5 * img_stds[i],
-    ) or sorted(eligible_ids, key=lambda i: img_means[i])
-    bright_pool = sorted(
-        [i for i in eligible_ids if img_means[i] > 155.0],
-        key=lambda i: (255.0 - img_means[i]) + 1.5 * img_stds[i],
-    ) or sorted(eligible_ids, key=lambda i: -img_means[i])
+        eligible_ids = [i for i in range(num_images) if eligible_mask[i]] or list(range(num_images))
+        dark_pool = sorted(
+            [i for i in eligible_ids if img_means[i] < 100.0],
+            key=lambda i: img_means[i] + 1.5 * img_stds[i],
+        ) or sorted(eligible_ids, key=lambda i: img_means[i])
+        bright_pool = sorted(
+            [i for i in eligible_ids if img_means[i] > 155.0],
+            key=lambda i: (255.0 - img_means[i]) + 1.5 * img_stds[i],
+        ) or sorted(eligible_ids, key=lambda i: -img_means[i])
 
     # Load dims and queries onto GPU; stream gray_np in VRAM-bounded chunks.
     dims_gpu = torch.from_numpy(dims_np).to(device=device, dtype=torch.int32)
@@ -467,170 +656,174 @@ def run_search(
     refined_per_tex: list[list[dict]] = [[] for _ in range(m_tex)]
 
     if m_tex > 0:
-        tex_f32 = distinct_f32[textured_distinct].unsqueeze(1).to(device=device)
-        t32 = F.interpolate(tex_f32, size=(24, 32), mode="area").squeeze(1)
-        t64 = F.interpolate(tex_f32, size=(48, 64), mode="area").squeeze(1)
+        with torch.no_grad():
+            tex_f32 = distinct_f32[textured_distinct].unsqueeze(1).to(device=device)
+            t32 = F.interpolate(tex_f32, size=(24, 32), mode="area").squeeze(1)
+            t64 = F.interpolate(tex_f32, size=(48, 64), mode="area").squeeze(1)
 
-        t32_mir = torch.flip(t32, dims=[-1])
-        t64_mir = torch.flip(t64, dims=[-1])
+            t32_mir = torch.flip(t32, dims=[-1])
+            t64_mir = torch.flip(t64, dims=[-1])
 
-        q32_pairs = torch.stack((t32, t32_mir), dim=1).view(2 * m_tex, 768)
-        q64_pairs = torch.stack((t64, t64_mir), dim=1).view(2 * m_tex, 3072)
-        q32, _ = _normalize_rows(q32_pairs)
-        q64, _ = _normalize_rows(q64_pairs)
+            q32_pairs = torch.stack((t32, t32_mir), dim=1).view(2 * m_tex, 768)
+            q64_pairs = torch.stack((t64, t64_mir), dim=1).view(2 * m_tex, 3072)
+            q32, _ = _normalize_rows(q32_pairs)
+            q64, _ = _normalize_rows(q64_pairs)
 
-        num_q = 2 * m_tex
-        top_scores = torch.full((TOPK_COARSE, num_q), -2.0, dtype=torch.float32, device=device)
-        top_poses = torch.zeros((TOPK_COARSE, num_q, 6), dtype=torch.float32, device=device)
+            num_q = 2 * m_tex
+            top_scores = torch.full((TOPK_COARSE, num_q), -2.0, dtype=torch.float32, device=device)
+            top_poses = torch.zeros((TOPK_COARSE, num_q, 6), dtype=torch.float32, device=device)
 
-        acc_scores: list[torch.Tensor] = []
-        acc_poses: list[torch.Tensor] = []
+            acc_scores: list[torch.Tensor] = []
+            acc_poses: list[torch.Tensor] = []
 
-        batch_imgs = 32
-        pbar = tqdm(total=num_images, desc="coarse-32x24", unit="img")
-        for chunk_start in range(0, num_images, VRAM_CHUNK_IMGS):
-            chunk_end = min(num_images, chunk_start + VRAM_CHUNK_IMGS)
-            chunk_pack = (
-                torch.from_numpy(np.array(gray_np[chunk_start:chunk_end], copy=True))
-                .unsqueeze(1)
-                .to(device=device, dtype=torch.uint8)
-            )
-            chunk_dims = dims_gpu[chunk_start:chunk_end]
+            batch_imgs = 32
+            lap_kernel = _laplacian_kernel(device)
+            pbar = tqdm(total=num_images, desc="coarse-32x24", unit="img")
+            for chunk_start in range(0, num_images, VRAM_CHUNK_IMGS):
+                chunk_end = min(num_images, chunk_start + VRAM_CHUNK_IMGS)
+                chunk_pack = (
+                    torch.from_numpy(np.array(gray_np[chunk_start:chunk_end], copy=True))
+                    .unsqueeze(1)
+                    .to(device=device, dtype=torch.uint8)
+                )
+                chunk_dims = dims_gpu[chunk_start:chunk_end]
+                chunk_ids = torch.arange(chunk_start, chunk_end, device=device, dtype=torch.float32)
+                chunk_elig = torch.from_numpy(eligible_mask[chunk_start:chunk_end]).to(device=device)
+                chunk_poses_bp, chunk_valid_bp = _generate_poses_batch_gpu(
+                    chunk_ids,
+                    chunk_dims,
+                    scales=scales,
+                    max_center_offset=max_center_offset,
+                    eligible_batch=chunk_elig,
+                )
 
-            for img_start in range(chunk_start, chunk_end, batch_imgs):
-                img_end = min(chunk_end, img_start + batch_imgs)
-                pose_chunks: list[np.ndarray] = []
-                ranges: list[tuple[int, int]] = []
-                cursor = 0
-                for idx in range(img_start, img_end):
-                    if not eligible_mask[idx]:
-                        continue
-                    arr = _generate_image_poses(
-                        idx,
-                        int(dims_np[idx, 0]),
-                        int(dims_np[idx, 1]),
-                        scales=scales,
-                        max_center_offset=max_center_offset,
-                    )
-                    if arr.shape[0] > 0:
-                        pose_chunks.append(arr)
-                        ranges.append((cursor, cursor + arr.shape[0]))
-                        cursor += arr.shape[0]
-                pbar.update(img_end - img_start)
-                if pose_chunks:
-                    poses_batch_gpu = torch.from_numpy(np.concatenate(pose_chunks, axis=0)).to(device=device)
-                    patches_32, stds, sharpness = _sample_patches(
-                        chunk_pack,
-                        chunk_dims,
-                        poses_batch_gpu,
-                        canvas_size,
-                        grid_w=32,
-                        grid_h=24,
-                        supersample_2x=True,
-                        pose_batch=2048,
-                        img_id_offset=chunk_start,
-                    )
-                    scores = patches_32 @ q32.T  # (P, 2*M_tex)
-                    invalid = (stds < MIN_PATCH_STD) | (sharpness < min_sharpness)
-                    if invalid.any():
-                        scores[invalid] = -2.0
+                for img_start in range(chunk_start, chunk_end, batch_imgs):
+                    img_end = min(chunk_end, img_start + batch_imgs)
+                    B = img_end - img_start
+                    local_s = img_start - chunk_start
+                    local_e = img_end - chunk_start
+                    elig_slice = eligible_mask[img_start:img_end]
+                    pbar.update(B)
 
-                    batch_best_scores = torch.empty((len(ranges), num_q), dtype=torch.float32, device=device)
-                    batch_best_poses = torch.empty((len(ranges), num_q, 6), dtype=torch.float32, device=device)
-                    for r_i, (s, e) in enumerate(ranges):
-                        best_v, best_loc = scores[s:e].max(dim=0)
-                        batch_best_scores[r_i] = best_v
-                        batch_best_poses[r_i] = poses_batch_gpu[s + best_loc]
+                    if bool(elig_slice.any()) and chunk_poses_bp.shape[1] > 0:
+                        dims_batch = chunk_dims[local_s:local_e]
+                        poses_bp = chunk_poses_bp[local_s:local_e]
+                        valid_bp = chunk_valid_bp[local_s:local_e]
+                        imgs_half = F.avg_pool2d(
+                            chunk_pack[local_s:local_e].float(), kernel_size=2, stride=2
+                        )
+                        patches_bp, stds_bp, sharp_bp = _sample_patches_grouped(
+                            imgs_half,
+                            dims_batch.float(),
+                            poses_bp,
+                            canvas_size,
+                            grid_w=32,
+                            grid_h=24,
+                            supersample_2x=False,
+                            lap_kernel=lap_kernel,
+                            pose_chunk=304,
+                        )
+                        P = poses_bp.shape[1]
+                        scores = (patches_bp.view(B * P, 768) @ q32.T).view(B, P, num_q)
+                        invalid = (
+                            (~valid_bp)
+                            | (stds_bp < MIN_PATCH_STD)
+                            | (sharp_bp < (min_sharpness * 0.8))
+                        )
+                        if invalid.any():
+                            scores.masked_fill_(invalid.unsqueeze(-1), -2.0)
 
-                    acc_scores.append(batch_best_scores)
-                    acc_poses.append(batch_best_poses)
+                        batch_best_scores, best_loc = scores.max(dim=1)
+                        batch_best_poses = poses_bp.gather(1, best_loc.unsqueeze(-1).expand(B, num_q, 6))
+                        acc_scores.append(batch_best_scores)
+                        acc_poses.append(batch_best_poses)
 
-                if acc_scores and (len(acc_scores) >= 8 or img_end == num_images):
-                    cand_s = torch.cat([top_scores, *acc_scores], dim=0)
-                    cand_p = torch.cat([top_poses, *acc_poses], dim=0)
-                    new_scores, new_idx = torch.topk(cand_s, k=TOPK_COARSE, dim=0)
-                    q_arange = torch.arange(num_q, device=device).unsqueeze(0).expand(TOPK_COARSE, num_q)
-                    top_scores = new_scores
-                    top_poses = cand_p[new_idx, q_arange]
-                    acc_scores.clear()
-                    acc_poses.clear()
-        pbar.close()
+                    if acc_scores and (len(acc_scores) >= 8 or img_end == num_images):
+                        cand_s = torch.cat([top_scores, *acc_scores], dim=0)
+                        cand_p = torch.cat([top_poses, *acc_poses], dim=0)
+                        new_scores, new_idx = torch.topk(cand_s, k=TOPK_COARSE, dim=0)
+                        q_arange = torch.arange(num_q, device=device).unsqueeze(0).expand(TOPK_COARSE, num_q)
+                        top_scores = new_scores
+                        top_poses = cand_p[new_idx, q_arange]
+                        acc_scores.clear()
+                        acc_poses.clear()
+            pbar.close()
 
-        # Merge as-is and mirrored top-48 lists per textured frame, keeping top-32 distinct images.
-        top_scores_cpu = top_scores.cpu().numpy()
-        top_poses_cpu = top_poses.cpu().numpy()
+            # Merge as-is and mirrored top-48 lists per textured frame, keeping top-32 distinct images.
+            top_scores_cpu = top_scores.cpu().numpy()
+            top_poses_cpu = top_poses.cpu().numpy()
 
-        cand_list_poses: list[np.ndarray] = []
-        cand_list_qidx: list[int] = []
-        cand_list_s32: list[float] = []
-        cand_slices: list[tuple[int, int]] = []
+            cand_list_poses: list[np.ndarray] = []
+            cand_list_qidx: list[int] = []
+            cand_list_s32: list[float] = []
+            cand_slices: list[tuple[int, int]] = []
 
-        for t_i in range(m_tex):
-            q_even = 2 * t_i
-            q_odd = 2 * t_i + 1
-            best_by_img: dict[int, tuple[float, np.ndarray, int]] = {}
-            for q_id, mir_flag in ((q_even, 0.0), (q_odd, 1.0)):
-                for rank in range(TOPK_COARSE):
-                    sc = float(top_scores_cpu[rank, q_id])
-                    if sc <= -1.5:
-                        continue
-                    pose_row = top_poses_cpu[rank, q_id].copy()
-                    pose_row[5] = mir_flag
-                    im_id = int(pose_row[0])
-                    prev = best_by_img.get(im_id)
-                    if prev is None or sc > prev[0]:
-                        best_by_img[im_id] = (sc, pose_row, q_id)
+            for t_i in range(m_tex):
+                q_even = 2 * t_i
+                q_odd = 2 * t_i + 1
+                best_by_img: dict[int, tuple[float, np.ndarray, int]] = {}
+                for q_id, mir_flag in ((q_even, 0.0), (q_odd, 1.0)):
+                    for rank in range(TOPK_COARSE):
+                        sc = float(top_scores_cpu[rank, q_id])
+                        if sc <= -1.5:
+                            continue
+                        pose_row = top_poses_cpu[rank, q_id].copy()
+                        pose_row[5] = mir_flag
+                        im_id = int(pose_row[0])
+                        prev = best_by_img.get(im_id)
+                        if prev is None or sc > prev[0]:
+                            best_by_img[im_id] = (sc, pose_row, q_id)
 
-            sorted_cands = sorted(best_by_img.values(), key=lambda x: x[0], reverse=True)[
-                :REFINED_CANDIDATES
-            ]
-            s_idx = len(cand_list_poses)
-            for sc32, pose_row, _ in sorted_cands:
-                cand_list_poses.append(pose_row)
-                # pose_row[5] already encodes mir_flag, so refine against unflipped query q_even.
-                cand_list_qidx.append(q_even)
-                cand_list_s32.append(sc32)
-            cand_slices.append((s_idx, len(cand_list_poses)))
+                sorted_cands = sorted(best_by_img.values(), key=lambda x: x[0], reverse=True)[
+                    :REFINED_CANDIDATES
+                ]
+                s_idx = len(cand_list_poses)
+                for sc32, pose_row, _ in sorted_cands:
+                    cand_list_poses.append(pose_row)
+                    # pose_row[5] already encodes mir_flag, so refine against unflipped query q_even.
+                    cand_list_qidx.append(q_even)
+                    cand_list_s32.append(sc32)
+                cand_slices.append((s_idx, len(cand_list_poses)))
 
-        if cand_list_poses:
-            cand_poses_gpu = torch.from_numpy(np.stack(cand_list_poses, axis=0)).to(device=device)
-            cand_qidx_gpu = torch.tensor(cand_list_qidx, dtype=torch.long, device=device)
-            print(f"refining {cand_poses_gpu.shape[0]} candidates at 64x48...", flush=True)
-            ref_poses_gpu, ref_scores_gpu, ref_s32 = _refine_chunked(
-                gray_np,
-                dims_gpu,
-                q64,
-                q32,
-                cand_poses_gpu,
-                cand_qidx_gpu,
-                canvas_size,
-                min_fit_ratio=min_scale,
-                min_sharpness=min_sharpness,
-                max_center_offset=max_center_offset,
-            )
+            if cand_list_poses:
+                cand_poses_gpu = torch.from_numpy(np.stack(cand_list_poses, axis=0)).to(device=device)
+                cand_qidx_gpu = torch.tensor(cand_list_qidx, dtype=torch.long, device=device)
+                print(f"refining {cand_poses_gpu.shape[0]} candidates at 64x48...", flush=True)
+                ref_poses_gpu, ref_scores_gpu, ref_s32 = _refine_chunked(
+                    gray_np,
+                    dims_gpu,
+                    q64,
+                    q32,
+                    cand_poses_gpu,
+                    cand_qidx_gpu,
+                    canvas_size,
+                    min_fit_ratio=min_scale,
+                    min_sharpness=min_sharpness,
+                    max_center_offset=max_center_offset,
+                )
 
-            ref_poses_cpu = ref_poses_gpu.cpu().numpy()
-            ref_s64_cpu = ref_scores_gpu.cpu().numpy()
-            ref_s32_cpu = ref_s32.cpu().numpy()
+                ref_poses_cpu = ref_poses_gpu.cpu().numpy()
+                ref_s64_cpu = ref_scores_gpu.cpu().numpy()
+                ref_s32_cpu = ref_s32.cpu().numpy()
 
-            for t_i, (s_idx, e_idx) in enumerate(cand_slices):
-                entries = []
-                for idx in range(s_idx, e_idx):
-                    row = ref_poses_cpu[idx]
-                    entries.append(
-                        {
-                            "image_idx": int(row[0]),
-                            "cx_frac": float(row[1]),
-                            "cy_frac": float(row[2]),
-                            "w_frac": float(row[3]),
-                            "theta": float(row[4]),
-                            "mirrored": bool(row[5] > 0.5),
-                            "score_64": float(ref_s64_cpu[idx]),
-                            "score_32": float(max(float(ref_s32_cpu[idx]), cand_list_s32[idx])),
-                        }
-                    )
-                entries.sort(key=lambda e: e["score_64"], reverse=True)
-                refined_per_tex[t_i] = entries
+                for t_i, (s_idx, e_idx) in enumerate(cand_slices):
+                    entries = []
+                    for idx in range(s_idx, e_idx):
+                        row = ref_poses_cpu[idx]
+                        entries.append(
+                            {
+                                "image_idx": int(row[0]),
+                                "cx_frac": float(row[1]),
+                                "cy_frac": float(row[2]),
+                                "w_frac": float(row[3]),
+                                "theta": float(row[4]),
+                                "mirrored": bool(row[5] > 0.5),
+                                "score_64": float(ref_s64_cpu[idx]),
+                                "score_32": float(max(float(ref_s32_cpu[idx]), cand_list_s32[idx])),
+                            }
+                        )
+                    entries.sort(key=lambda e: e["score_64"], reverse=True)
+                    refined_per_tex[t_i] = entries
 
     ant_gate: AntGate | None = None
     if min_ant_score > 0.0 and m_tex > 0:

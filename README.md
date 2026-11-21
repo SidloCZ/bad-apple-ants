@@ -50,7 +50,7 @@ uv run python -m badapple_ants render --main-mode grayscale-stretch
 | `badapple_ants/catalog.py` | GBIF REST API and streaming DwC-A (`catalog-dwca`) catalog builder across iNaturalist, AntWeb, Harvard MCZ, and Smithsonian NMNH (filters labels, `ND`, and `--commercial-only`) |
 | `badapple_ants/download.py` | Per-host throttled async thumbnail downloader (sharded cache), low-RAM memmap `192x192` packer, and high-res winner fetcher |
 | `badapple_ants/ant_gate.py` | Batched GPU OpenCLIP (`ViT-B-32`) ant-presence gate rejecting empty backgrounds, glare, bokeh, hands, and labels |
-| `badapple_ants/search.py` | Memory-mapped / VRAM-chunked CUDA `32x24` NCC coarse search, Laplacian sharpness & center-offset bounds, `64x48` refinement, CLIP gating, and cooldown/reuse timeline selector |
+| `badapple_ants/search.py` | Memory-mapped / VRAM-chunked CUDA `32x24` NCC coarse search (`_generate_poses_batch_gpu` + zero-copy `96x96`-pooled `_sample_patches_grouped`), Laplacian sharpness & center-offset bounds, family-only filtering, `64x48` refinement, CLIP gating, and cooldown/reuse timeline selector |
 | `badapple_ants/render.py` | `1280x720` composite H.264/AAC renderer (with multi-script font fallback), diagnostic still exporter, and `CREDITS.txt` generator |
 | `badapple_ants/__main__.py` | CLI entry point (`python -m badapple_ants`) |
 | `tests/test_geometry.py`, `tests/test_catalog_download.py`, `tests/test_render_fonts.py`, `tests/test_search_filters.py` | Unit tests for GPU/Pillow alignment, license & label filters, DwC-A import, sharded cache packing, chunked refinement, font fallback, and anti-bokeh sharpness/scale bounds |

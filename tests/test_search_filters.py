@@ -19,8 +19,11 @@ from badapple_ants.search import (
     _clamp_poses_batch,
     _coarse_scales,
     _generate_image_poses,
+    _generate_poses_batch_gpu,
+    _laplacian_kernel,
     _refine_chunked,
     _sample_patches,
+    _sample_patches_grouped,
 )
 
 
@@ -166,3 +169,65 @@ def test_has_genus_or_species_filter() -> None:
     assert has_genus_or_species({"genus": "  ", "species": None}) is False
     assert has_genus_or_species({"genus": "Camponotus", "species": ""}) is True
     assert has_genus_or_species({"genus": "", "species": "Lasius niger"}) is True
+
+
+def test_generate_poses_batch_gpu_matches_cpu() -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dims_list = [(192, 144), (148, 192), (192, 108)]
+    dims_t = torch.tensor(dims_list, dtype=torch.int32, device=device)
+    img_ids = torch.arange(len(dims_list), dtype=torch.float32, device=device)
+    scales = _coarse_scales(0.65)
+
+    poses_bp, valid_bp = _generate_poses_batch_gpu(
+        img_ids, dims_t, scales=scales, max_center_offset=MAX_CENTER_OFFSET
+    )
+    for idx, (w, h) in enumerate(dims_list):
+        cpu_arr = _generate_image_poses(idx, w, h, scales=scales, max_center_offset=MAX_CENTER_OFFSET)
+        gpu_arr = poses_bp[idx][valid_bp[idx]].cpu().numpy()
+        assert gpu_arr.shape == cpu_arr.shape
+        cpu_sorted = cpu_arr[np.lexsort((cpu_arr[:, 2], cpu_arr[:, 1], cpu_arr[:, 3], cpu_arr[:, 4]))]
+        gpu_sorted = gpu_arr[np.lexsort((gpu_arr[:, 2], gpu_arr[:, 1], gpu_arr[:, 3], gpu_arr[:, 4]))]
+        assert np.allclose(gpu_sorted, cpu_sorted, atol=1e-5)
+
+
+def test_sample_patches_grouped_matches_legacy() -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    rng = np.random.default_rng(13)
+    imgs_u8 = rng.integers(0, 255, size=(3, 192, 192), dtype=np.uint8)
+    dims_list = [(192, 144), (148, 192), (192, 108)]
+    dims_t = torch.tensor(dims_list, dtype=torch.int32, device=device)
+    img_ids = torch.arange(len(dims_list), dtype=torch.float32, device=device)
+
+    poses_bp, valid_bp = _generate_poses_batch_gpu(
+        img_ids, dims_t, scales=_coarse_scales(0.65), max_center_offset=MAX_CENTER_OFFSET
+    )
+    imgs_pack = torch.from_numpy(imgs_u8).unsqueeze(1).to(device=device, dtype=torch.uint8)
+    p_grp, std_grp, sh_grp = _sample_patches_grouped(
+        imgs_pack.float(),
+        dims_t.float(),
+        poses_bp,
+        canvas_size=192,
+        grid_w=32,
+        grid_h=24,
+        supersample_2x=True,
+        lap_kernel=_laplacian_kernel(device),
+        pose_chunk=160,
+    )
+
+    valid_idx = torch.nonzero(valid_bp, as_tuple=False)
+    b_idx = valid_idx[:, 0]
+    p_idx = valid_idx[:, 1]
+    flat_poses = poses_bp[b_idx, p_idx]
+    p_leg, std_leg, sh_leg = _sample_patches(
+        imgs_pack,
+        dims_t,
+        flat_poses,
+        canvas_size=192,
+        grid_w=32,
+        grid_h=24,
+        supersample_2x=True,
+        pose_batch=512,
+    )
+    assert torch.allclose(p_grp[b_idx, p_idx], p_leg, atol=1e-5)
+    assert torch.allclose(std_grp[b_idx, p_idx], std_leg, atol=1e-5)
+    assert torch.allclose(sh_grp[b_idx, p_idx], sh_leg, atol=1e-5)

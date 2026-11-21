@@ -37,8 +37,8 @@ Forked from upstream reference repository [`ikuto32/bad-apple-earth-moon`](https
   - Added streaming `catalog-dwca` importer in `badapple_ants/catalog.py` (`iNaturalist` + `AntWeb` + `Harvard MCZ` IIIF + `Smithsonian NMNH` thumbnails, species-diverse bounded selection, media-level `ND` exclusion, and `--commercial-only`), sharded/memmap caching in `badapple_ants/download.py`, and VRAM-chunked GPU search in `badapple_ants/search.py`.
   - Next: generate `250,000`-image catalog, download thumbnails (`~7.7 GB` thumbs + `~9.2 GB` pack), and scale matching to the full video.
 - [ ] **Search throughput & upstream engine evaluation**
-  - Evaluate scaling the PyTorch CUDA sharded search vs. adapting the native Rust/CUDA search engine (`cuda/moon/moon.cu`, `rust/moon-search/`) from upstream `ikuto32/bad-apple-earth-moon` with configurable `CUDA_ARCH` and VRAM sharding.
-  - Optionally support hardware NVENC (`h264_nvenc` / `hevc_nvenc`) alongside CPU `libx264` for faster full-length 1080p/1440p renders on supported GPUs.
+  - **PyTorch CUDA vectorization (done):** Hoisted vectorized `_generate_poses_batch_gpu` once per `4,096`-image chunk, switched coarse sampling to zero-copy grouped `F.grid_sample` (`_sample_patches_grouped`) over `2x2` anti-aliased `96x96` canvases, and skipped full-disk solid-frame scans when no solid frames exist (`831 img/s` measured on `16,384` images vs. `287 img/s` baseline, `~2.89x` speedup with identical `0.770` `64x48` median NCC).
+  - Remaining: evaluate adapting the native Rust/CUDA search engine (`cuda/moon/moon.cu`, `rust/moon-search/`) from upstream `ikuto32/bad-apple-earth-moon` for full `~6,500`-frame song runs, and optionally support hardware NVENC (`h264_nvenc` / `hevc_nvenc`) alongside CPU `libx264` for faster full-length renders.
 - [ ] **Attribution, licensing, and export**
   - Provide a clean `--commercial-only` flag filtering strictly to `CC0-1.0`, `CC-BY-4.0`, and `CC-BY-SA-4.0` (excluding `CC-BY-NC*` for commercial-compatible releases).
   - Export full-run `CREDITS.txt` and per-frame CSV/JSON metadata suitable for an interactive species/map explorer.
