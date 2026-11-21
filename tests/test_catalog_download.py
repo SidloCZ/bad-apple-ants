@@ -11,7 +11,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from badapple_ants.catalog import build_catalog_dwca, normalize_license, parse_media_candidate
-from badapple_ants.download import _thumb_path, pack_thumbs
+from badapple_ants.download import _run_worker_pool, _thumb_path, pack_thumbs
 from badapple_ants.search import _refine_chunked
 
 
@@ -128,6 +128,18 @@ def test_dwca_build_and_sharded_pack(tmp_path: Path) -> None:
     assert stats["total"] == 2
     assert stats["sources"] == {"antweb": 1, "inat": 1}
 
+    stats_unlim = build_catalog_dwca(
+        tmp_path / "catalog_unlim.jsonl",
+        zip_path=zip_path,
+        inat_target=10,
+        antweb_target=10,
+        mcz_target=0,
+        nmnh_target=0,
+        fill_remainder=False,
+        max_per_occurrence=0,
+    )
+    assert stats_unlim["total"] == 2
+
     # Verify legacy flat file reuse and sharded pack creation
     cache_dir = tmp_path / "cache"
     items = [__import__("json").loads(line) for line in cat_path.read_text(encoding="utf-8").splitlines()]
@@ -172,4 +184,33 @@ def test_refine_chunked_consistency() -> None:
     assert torch.allclose(p1, p2)
     assert torch.allclose(s64_1, s64_2)
     assert torch.allclose(s32_1, s32_2)
+
+
+def test_worker_pool_circuit_breaker(monkeypatch, tmp_path: Path) -> None:
+    import asyncio
+    from tqdm import tqdm
+
+    called: list[str] = []
+
+    async def fake_fetch(client, host_sems, default_sem, url, dest) -> str:
+        called.append(url)
+        return "transport_err"
+
+    monkeypatch.setattr("badapple_ants.download._fetch_one", fake_fetch)
+    pairs = [(f"https://example.org/{i}.jpg", tmp_path / f"{i}.jpg") for i in range(50)]
+    with tqdm(total=len(pairs), disable=True) as pbar:
+        ok = asyncio.run(
+            _run_worker_pool(
+                pairs,
+                client=None,  # type: ignore[arg-type]
+                host_sems={},
+                default_sem=asyncio.Semaphore(4),
+                num_workers=2,
+                pbar=pbar,
+                label="example.org",
+                max_consec_transport_errors=5,
+            )
+        )
+    assert ok == 0
+    assert len(called) < len(pairs)
 

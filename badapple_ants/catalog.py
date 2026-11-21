@@ -571,6 +571,10 @@ def build_catalog_dwca(
                 elif entry > hp[0]:
                     heapq.heapreplace(hp, entry)
 
+    # Free occurrence lookup table before ranking and JSON serialization.
+    occ_map.clear()
+    del occ_map
+
     # Extract items ordered best-diversity-first (-neg_rank ascending = rank 0 first) per source.
     ordered: dict[str, list[dict]] = {}
     selected: list[dict] = []

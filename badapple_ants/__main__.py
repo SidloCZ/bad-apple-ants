@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> None:
     p_dwca.add_argument("--antweb", type=int, default=85000)
     p_dwca.add_argument("--mcz", type=int, default=10000)
     p_dwca.add_argument("--nmnh", type=int, default=5000)
+    p_dwca.add_argument("--max-per-occ", type=int, default=2, help="Max photos per occurrence (0 = unlimited)")
     p_dwca.add_argument("--commercial-only", action="store_true")
     p_dwca.add_argument("--no-fill", action="store_true")
 
@@ -93,6 +94,7 @@ def main(argv: list[str] | None = None) -> None:
             nmnh_target=args.nmnh,
             commercial_only=args.commercial_only,
             fill_remainder=not args.no_fill,
+            max_per_occurrence=args.max_per_occ,
         )
     elif args.command == "download-thumbs":
         download_thumbs(

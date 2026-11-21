@@ -18,9 +18,11 @@ from PIL import Image, ImageOps
 from tqdm import tqdm
 
 _HOST_CONCURRENCY = {
+    "static.antweb.org": 4,
     "iiif.mcz.harvard.edu": 6,
     "collections.nmnh.si.edu": 6,
 }
+_REQUEST_TIMEOUT = httpx.Timeout(25.0, connect=8.0)
 
 
 def _ext_from_url(url: str) -> str:
@@ -52,18 +54,19 @@ async def _fetch_one(
     default_sem: asyncio.Semaphore,
     url: str,
     dest: Path,
-) -> bool:
+) -> str:
+    """Fetch and verify one image. Returns 'ok', 'http_err', or 'transport_err'."""
     if dest.is_file() and dest.stat().st_size > 0:
-        return True
+        return "ok"
     dest.parent.mkdir(parents=True, exist_ok=True)
     host = urlparse(url).netloc.lower()
     sem = host_sems.get(host, default_sem)
     async with sem:
         for attempt in range(3):
             try:
-                resp = await client.get(url, timeout=25.0)
+                resp = await client.get(url, timeout=_REQUEST_TIMEOUT)
                 if resp.status_code in (403, 404, 410):
-                    return False
+                    return "http_err"
                 if resp.status_code == 429 or resp.status_code >= 500:
                     await asyncio.sleep(1.5 * (attempt + 1))
                     continue
@@ -74,64 +77,125 @@ async def _fetch_one(
                 partial = dest.with_suffix(dest.suffix + ".part")
                 partial.write_bytes(data)
                 partial.replace(dest)
-                return True
-            except Exception:
+                return "ok"
+            except httpx.HTTPStatusError:
+                return "http_err"
+            except (httpx.TimeoutException, httpx.TransportError):
                 if attempt == 2:
-                    return False
+                    return "transport_err"
                 await asyncio.sleep(0.5 * (attempt + 1))
-    return False
+            except Exception:
+                return "http_err"
+    return "transport_err"
+
+
+async def _run_worker_pool(
+    pairs: list[tuple[str, Path]],
+    client: httpx.AsyncClient,
+    host_sems: dict[str, asyncio.Semaphore],
+    default_sem: asyncio.Semaphore,
+    num_workers: int,
+    pbar: tqdm,
+    label: str = "fast",
+    max_consec_transport_errors: int = 0,
+) -> int:
+    if not pairs:
+        return 0
+    ok_count = 0
+    consec_transport = 0
+    aborted = False
+    idx = 0
+    total = len(pairs)
+
+    async def worker() -> None:
+        nonlocal idx, ok_count, consec_transport, aborted
+        while idx < total and not aborted:
+            cur = idx
+            idx += 1
+            url, dest = pairs[cur]
+            status = await _fetch_one(client, host_sems, default_sem, url, dest)
+            if status == "ok":
+                ok_count += 1
+                consec_transport = 0
+            elif status == "http_err":
+                consec_transport = 0
+            else:
+                consec_transport += 1
+                if max_consec_transport_errors > 0 and consec_transport >= max_consec_transport_errors and not aborted:
+                    aborted = True
+                    skipped = total - idx
+                    if skipped > 0:
+                        pbar.update(skipped)
+                    pbar.write(
+                        f"download: {label} hit {consec_transport} consecutive transport timeouts; "
+                        f"skipping remaining {skipped} URLs cleanly"
+                    )
+            pbar.update(1)
+
+    await asyncio.gather(*(worker() for _ in range(min(num_workers, total))))
+    return ok_count
 
 
 async def _download_thumbs_async(items: list[dict], cache_dir: Path, concurrency: int) -> int:
     default_sem = asyncio.Semaphore(concurrency)
     host_sems = {host: asyncio.Semaphore(cap) for host, cap in _HOST_CONCURRENCY.items()}
-    limits = httpx.Limits(max_connections=concurrency + 16, max_keepalive_connections=concurrency)
+    limits = httpx.Limits(max_connections=concurrency + 24, max_keepalive_connections=concurrency)
     headers = {"User-Agent": "badapple-ants-proto/0.1"}
 
-    pending: list[tuple[str, Path]] = []
+    fast_pending: list[tuple[str, Path]] = []
+    throttled_pending: dict[str, list[tuple[str, Path]]] = defaultdict(list)
     cached = 0
     for item in items:
         dest = _thumb_path(cache_dir, item)
         if dest.is_file() and dest.stat().st_size > 0:
             cached += 1
+            continue
+        url = item["thumb_url"]
+        host = urlparse(url).netloc.lower()
+        if host in _HOST_CONCURRENCY:
+            throttled_pending[host].append((url, dest))
         else:
-            pending.append((item["thumb_url"], dest))
+            fast_pending.append((url, dest))
 
-    print(f"thumbs: {cached}/{len(items)} already cached, fetching {len(pending)}...", flush=True)
-    if not pending:
+    total_pending = len(fast_pending) + sum(len(v) for v in throttled_pending.values())
+    print(f"thumbs: {cached}/{len(items)} already cached, fetching {total_pending}...", flush=True)
+    if total_pending == 0:
         return cached
 
-    ok_new = 0
-    queue: asyncio.Queue[tuple[str, Path] | None] = asyncio.Queue(maxsize=concurrency * 4)
-
-    async def producer() -> None:
-        for pair in pending:
-            await queue.put(pair)
-        for _ in range(concurrency):
-            await queue.put(None)
-
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, limits=limits) as client:
-        pbar = tqdm(total=len(pending), desc="thumbs", unit="img")
-
-        async def worker() -> None:
-            nonlocal ok_new
-            while True:
-                pair = await queue.get()
-                if pair is None:
-                    queue.task_done()
-                    break
-                url, dest = pair
-                if await _fetch_one(client, host_sems, default_sem, url, dest):
-                    ok_new += 1
-                pbar.update(1)
-                queue.task_done()
-
+        pbar = tqdm(total=total_pending, desc="thumbs", unit="img")
         try:
-            await asyncio.gather(producer(), *(worker() for _ in range(concurrency)))
+            # Run each throttled host in its own worker pool so it overlaps with fast S3/CDN fetches.
+            coros = [
+                _run_worker_pool(
+                    fast_pending,
+                    client,
+                    host_sems,
+                    default_sem,
+                    concurrency,
+                    pbar,
+                    label="fast",
+                    max_consec_transport_errors=0,
+                ),
+                *(
+                    _run_worker_pool(
+                        pairs,
+                        client,
+                        host_sems,
+                        default_sem,
+                        min(_HOST_CONCURRENCY[host], concurrency),
+                        pbar,
+                        label=host,
+                        max_consec_transport_errors=24,
+                    )
+                    for host, pairs in throttled_pending.items()
+                ),
+            ]
+            results = await asyncio.gather(*coros)
         finally:
             pbar.close()
 
-    return cached + ok_new
+    return cached + sum(results)
 
 
 def _process_one_thumb(args: tuple[int, dict, Path, int]) -> tuple[int, np.ndarray, int, int, str] | None:
@@ -185,22 +249,32 @@ def pack_thumbs(
     skipped = 0
     valid_count = 0
 
-    tasks = ((i, it, _thumb_path(cache_dir, it), canvas_size) for i, it in enumerate(items))
-    workers = min(8, os.cpu_count() or 4)
+    workers = min(12, os.cpu_count() or 4)
     try:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for res in tqdm(pool.map(_process_one_thumb, tasks, chunksize=64), total=total, desc="pack", unit="img"):
-                if res is None:
-                    skipped += 1
-                    continue
-                idx, canvas, new_w, new_h, path_str = res
-                tmp_mm[valid_count] = canvas
-                dims_list.append((new_w, new_h))
-                entry = dict(items[idx])
-                entry["thumb_path"] = path_str
-                entry["pack_dims"] = [new_w, new_h]
-                valid_items.append(entry)
-                valid_count += 1
+        pbar = tqdm(total=total, desc="pack", unit="img")
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for batch_start in range(0, total, 16384):
+                    batch_end = min(total, batch_start + 16384)
+                    batch_tasks = (
+                        (i, items[i], _thumb_path(cache_dir, items[i]), canvas_size)
+                        for i in range(batch_start, batch_end)
+                    )
+                    for res in pool.map(_process_one_thumb, batch_tasks):
+                        pbar.update(1)
+                        if res is None:
+                            skipped += 1
+                            continue
+                        idx, canvas, new_w, new_h, path_str = res
+                        tmp_mm[valid_count] = canvas
+                        dims_list.append((new_w, new_h))
+                        entry = dict(items[idx])
+                        entry["thumb_path"] = path_str
+                        entry["pack_dims"] = [new_w, new_h]
+                        valid_items.append(entry)
+                        valid_count += 1
+        finally:
+            pbar.close()
         tmp_mm.flush()
 
         if valid_count == 0:
@@ -229,9 +303,15 @@ def pack_thumbs(
 
     dims_arr = np.asarray(dims_list, dtype=np.int32)
     np.save(pack_dir / "dims.npy", dims_arr, allow_pickle=False)
-    (pack_dir / "items.json").write_text(
-        json.dumps(valid_items, ensure_ascii=False), encoding="utf-8"
-    )
+    part_items = pack_dir / "items.part.json"
+    with part_items.open("w", encoding="utf-8") as f:
+        f.write("[")
+        for idx_it, entry in enumerate(valid_items):
+            if idx_it:
+                f.write(",")
+            f.write(json.dumps(entry, ensure_ascii=False))
+        f.write("]")
+    part_items.replace(pack_dir / "items.json")
     meta = {
         "count": len(valid_items),
         "skipped": skipped,
@@ -272,12 +352,12 @@ async def _download_winners_async(
 
     async def get_best(client: httpx.AsyncClient, item: dict) -> tuple[str, str]:
         dest = _full_path(cache_dir, item)
-        if await _fetch_one(client, host_sems, default_sem, item["full_url"], dest):
+        if await _fetch_one(client, host_sems, default_sem, item["full_url"], dest) == "ok":
             return item["id"], str(dest)
         fb = item.get("fallback_full_url") or ""
         if fb:
             fb_dest = cache_dir / "full" / item["source"] / f"{item['id']}_fb{_ext_from_url(fb)}"
-            if await _fetch_one(client, host_sems, default_sem, fb, fb_dest):
+            if await _fetch_one(client, host_sems, default_sem, fb, fb_dest) == "ok":
                 return item["id"], str(fb_dest)
         return item["id"], str(_thumb_path(cache_dir, item))
 

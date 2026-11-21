@@ -33,7 +33,7 @@ Or run individual stages:
 ```powershell
 uv run python -m badapple_ants fetch-media
 uv run python -m badapple_ants catalog --inat 6500 --antweb 3500
-# Or stream a local GBIF Darwin Core Archive (250k species-balanced catalog):
+# Or stream a local GBIF Darwin Core Archive (250k default, or pass higher quotas + --max-per-occ 0 for all views):
 uv run python -m badapple_ants catalog-dwca --inat 150000 --antweb 85000 --mcz 10000 --nmnh 5000
 uv run python -m badapple_ants download-thumbs --concurrency 32
 uv run python -m badapple_ants search --start 25 --duration 25 --cooldown 15 --max-reuse 6
