@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,8 @@ MIN_FRAME_STD = 2.0
 TOPK_COARSE = 48
 REFINED_CANDIDATES = 32
 VRAM_CHUNK_IMGS = 4096
+QUERY_TILE = 2048
+DEFAULT_DEDUP_L1 = 1.2
 
 
 def _coarse_scales(min_scale: float) -> tuple[float, ...]:
@@ -70,7 +73,7 @@ def _generate_image_poses(
             if cw < 48.0:
                 continue
             w_frac = cw / wf
-            if scale >= 0.90:
+            if scale >= 0.78:
                 if pose_in_bounds(wf, hf, 0.5, 0.5, w_frac, theta, margin=0.5):
                     poses.append((float(img_idx), 0.5, 0.5, w_frac, theta, 0.0))
                 continue
@@ -160,7 +163,7 @@ def _generate_poses_batch_gpu(
         hx = 0.5 * cw * cos_a + 0.5 * ch * sin_a
         hy = 0.5 * cw * sin_a + 0.5 * ch * cos_a
 
-        if scale >= 0.90:
+        if scale >= 0.78:
             px = 0.5 * wf
             py = 0.5 * hf
             in_bounds = (
@@ -567,6 +570,7 @@ def run_search(
     min_sharpness: float = MIN_SHARPNESS_RATIO,
     max_center_offset: float = MAX_CENTER_OFFSET,
     min_ant_score: float = MIN_ANT_SCORE,
+    dedup_l1: float = DEFAULT_DEDUP_L1,
     max_images: int = 0,
 ) -> dict:
     """Run coarse 32x24 GPU NCC search, 64x48 refinement, CLIP ant-presence gate, and timeline assignment."""
@@ -594,11 +598,18 @@ def run_search(
     frames_u8, clip_meta = extract_clip_frames(video_path, start_s, duration_s, cache_dir)
     n_frames = frames_u8.shape[0]
 
-    # Deduplicate identical source frames while keeping frame order mapping.
+    # Deduplicate identical or near-identical consecutive frames while preserving exact order mapping.
     hash_to_distinct: dict[str, int] = {}
     distinct_indices: list[int] = []
     frame_to_distinct: list[int] = []
     for i in range(n_frames):
+        if i > 0 and dedup_l1 > 0.0:
+            prev_d = frame_to_distinct[i - 1]
+            prev_rep = frames_u8[distinct_indices[prev_d]]
+            diff = float(np.abs(frames_u8[i].astype(np.int16) - prev_rep.astype(np.int16)).mean())
+            if diff <= dedup_l1:
+                frame_to_distinct.append(prev_d)
+                continue
         digest = hashlib.sha256(frames_u8[i].tobytes()).hexdigest()
         d_idx = hash_to_distinct.get(digest)
         if d_idx is None:
@@ -620,35 +631,15 @@ def run_search(
 
     print(
         f"search: {n_frames} clip frames -> {m_distinct} distinct "
-        f"({m_tex} textured, {m_distinct - m_tex} solid) against {num_images - skipped_family_only} eligible images "
-        f"({skipped_family_only} family-only skipped) on {torch.cuda.get_device_name(0)}",
+        f"({m_tex} textured, {m_distinct - m_tex} solid, dedup_l1={dedup_l1}) against "
+        f"{num_images - skipped_family_only} eligible images ({skipped_family_only} family-only skipped) "
+        f"on {torch.cuda.get_device_name(0)}",
         flush=True,
     )
 
-    dark_pool: list[int] = []
-    bright_pool: list[int] = []
-    if bool(is_solid.any()):
-        # Compute image-level stats in chunks on real pixels [0:h, 0:w] for solid fallback frames.
-        img_means = np.empty((num_images,), dtype=np.float32)
-        img_stds = np.empty((num_images,), dtype=np.float32)
-        for s in range(0, num_images, VRAM_CHUNK_IMGS):
-            e = min(num_images, s + VRAM_CHUNK_IMGS)
-            block = np.asarray(gray_np[s:e])
-            for offset_i, i in enumerate(range(s, e)):
-                w, h = int(dims_np[i, 0]), int(dims_np[i, 1])
-                patch = block[offset_i, :h, :w]
-                img_means[i] = float(patch.mean())
-                img_stds[i] = float(patch.std())
-
-        eligible_ids = [i for i in range(num_images) if eligible_mask[i]] or list(range(num_images))
-        dark_pool = sorted(
-            [i for i in eligible_ids if img_means[i] < 100.0],
-            key=lambda i: img_means[i] + 1.5 * img_stds[i],
-        ) or sorted(eligible_ids, key=lambda i: img_means[i])
-        bright_pool = sorted(
-            [i for i in eligible_ids if img_means[i] > 155.0],
-            key=lambda i: (255.0 - img_means[i]) + 1.5 * img_stds[i],
-        ) or sorted(eligible_ids, key=lambda i: -img_means[i])
+    need_solid_stats = bool(is_solid.any())
+    img_means = np.empty((num_images,), dtype=np.float32) if need_solid_stats else None
+    img_stds = np.empty((num_images,), dtype=np.float32) if need_solid_stats else None
 
     # Load dims and queries onto GPU; stream gray_np in VRAM-bounded chunks.
     dims_gpu = torch.from_numpy(dims_np).to(device=device, dtype=torch.int32)
@@ -677,76 +668,115 @@ def run_search(
             acc_poses: list[torch.Tensor] = []
 
             batch_imgs = 32
+            flush_every = 4 if num_q > 4096 else 8
             lap_kernel = _laplacian_kernel(device)
+            if need_solid_stats:
+                pix_ys = torch.arange(canvas_size, device=device, dtype=torch.int32).view(1, canvas_size, 1)
+                pix_xs = torch.arange(canvas_size, device=device, dtype=torch.int32).view(1, 1, canvas_size)
+
+            def _load_gray_chunk(s: int, e: int) -> np.ndarray:
+                return np.array(gray_np[s:e], copy=True)
+
+            chunk_bounds = [
+                (cs, min(num_images, cs + VRAM_CHUNK_IMGS))
+                for cs in range(0, num_images, VRAM_CHUNK_IMGS)
+            ]
             pbar = tqdm(total=num_images, desc="coarse-32x24", unit="img")
-            for chunk_start in range(0, num_images, VRAM_CHUNK_IMGS):
-                chunk_end = min(num_images, chunk_start + VRAM_CHUNK_IMGS)
-                chunk_pack = (
-                    torch.from_numpy(np.array(gray_np[chunk_start:chunk_end], copy=True))
-                    .unsqueeze(1)
-                    .to(device=device, dtype=torch.uint8)
-                )
-                chunk_dims = dims_gpu[chunk_start:chunk_end]
-                chunk_ids = torch.arange(chunk_start, chunk_end, device=device, dtype=torch.float32)
-                chunk_elig = torch.from_numpy(eligible_mask[chunk_start:chunk_end]).to(device=device)
-                chunk_poses_bp, chunk_valid_bp = _generate_poses_batch_gpu(
-                    chunk_ids,
-                    chunk_dims,
-                    scales=scales,
-                    max_center_offset=max_center_offset,
-                    eligible_batch=chunk_elig,
-                )
+            with ThreadPoolExecutor(max_workers=1) as io_pool:
+                next_fut = io_pool.submit(_load_gray_chunk, *chunk_bounds[0]) if chunk_bounds else None
+                for b_i, (chunk_start, chunk_end) in enumerate(chunk_bounds):
+                    assert next_fut is not None
+                    chunk_np = next_fut.result()
+                    if b_i + 1 < len(chunk_bounds):
+                        next_fut = io_pool.submit(_load_gray_chunk, *chunk_bounds[b_i + 1])
+                    else:
+                        next_fut = None
 
-                for img_start in range(chunk_start, chunk_end, batch_imgs):
-                    img_end = min(chunk_end, img_start + batch_imgs)
-                    B = img_end - img_start
-                    local_s = img_start - chunk_start
-                    local_e = img_end - chunk_start
-                    elig_slice = eligible_mask[img_start:img_end]
-                    pbar.update(B)
-
-                    if bool(elig_slice.any()) and chunk_poses_bp.shape[1] > 0:
-                        dims_batch = chunk_dims[local_s:local_e]
-                        poses_bp = chunk_poses_bp[local_s:local_e]
-                        valid_bp = chunk_valid_bp[local_s:local_e]
-                        imgs_half = F.avg_pool2d(
-                            chunk_pack[local_s:local_e].float(), kernel_size=2, stride=2
+                    chunk_pack = torch.from_numpy(chunk_np).unsqueeze(1).to(device=device, dtype=torch.uint8)
+                    chunk_dims = dims_gpu[chunk_start:chunk_end]
+                    if need_solid_stats:
+                        assert img_means is not None and img_stds is not None
+                        c_len = chunk_end - chunk_start
+                        pix_mask = (pix_ys < chunk_dims[:, 1].view(c_len, 1, 1)) & (
+                            pix_xs < chunk_dims[:, 0].view(c_len, 1, 1)
                         )
-                        patches_bp, stds_bp, sharp_bp = _sample_patches_grouped(
-                            imgs_half,
-                            dims_batch.float(),
-                            poses_bp,
-                            canvas_size,
-                            grid_w=32,
-                            grid_h=24,
-                            supersample_2x=False,
-                            lap_kernel=lap_kernel,
-                            pose_chunk=304,
-                        )
-                        P = poses_bp.shape[1]
-                        scores = (patches_bp.view(B * P, 768) @ q32.T).view(B, P, num_q)
-                        invalid = (
-                            (~valid_bp)
-                            | (stds_bp < MIN_PATCH_STD)
-                            | (sharp_bp < (min_sharpness * 0.8))
-                        )
-                        if invalid.any():
-                            scores.masked_fill_(invalid.unsqueeze(-1), -2.0)
+                        vals = chunk_pack.squeeze(1).float() * pix_mask
+                        area = (chunk_dims[:, 0] * chunk_dims[:, 1]).float().clamp_min(1.0)
+                        sum1 = vals.sum(dim=(1, 2))
+                        sum2 = (vals * vals).sum(dim=(1, 2))
+                        mean_g = sum1 / area
+                        std_g = torch.sqrt((sum2 / area - mean_g * mean_g).clamp_min(0.0))
+                        img_means[chunk_start:chunk_end] = mean_g.cpu().numpy()
+                        img_stds[chunk_start:chunk_end] = std_g.cpu().numpy()
 
-                        batch_best_scores, best_loc = scores.max(dim=1)
-                        batch_best_poses = poses_bp.gather(1, best_loc.unsqueeze(-1).expand(B, num_q, 6))
-                        acc_scores.append(batch_best_scores)
-                        acc_poses.append(batch_best_poses)
+                    chunk_ids = torch.arange(chunk_start, chunk_end, device=device, dtype=torch.float32)
+                    chunk_elig = torch.from_numpy(eligible_mask[chunk_start:chunk_end]).to(device=device)
+                    chunk_poses_bp, chunk_valid_bp = _generate_poses_batch_gpu(
+                        chunk_ids,
+                        chunk_dims,
+                        scales=scales,
+                        max_center_offset=max_center_offset,
+                        eligible_batch=chunk_elig,
+                    )
 
-                    if acc_scores and (len(acc_scores) >= 8 or img_end == num_images):
-                        cand_s = torch.cat([top_scores, *acc_scores], dim=0)
-                        cand_p = torch.cat([top_poses, *acc_poses], dim=0)
-                        new_scores, new_idx = torch.topk(cand_s, k=TOPK_COARSE, dim=0)
-                        q_arange = torch.arange(num_q, device=device).unsqueeze(0).expand(TOPK_COARSE, num_q)
-                        top_scores = new_scores
-                        top_poses = cand_p[new_idx, q_arange]
-                        acc_scores.clear()
-                        acc_poses.clear()
+                    for img_start in range(chunk_start, chunk_end, batch_imgs):
+                        img_end = min(chunk_end, img_start + batch_imgs)
+                        B = img_end - img_start
+                        local_s = img_start - chunk_start
+                        local_e = img_end - chunk_start
+                        elig_slice = eligible_mask[img_start:img_end]
+                        pbar.update(B)
+
+                        if bool(elig_slice.any()) and chunk_poses_bp.shape[1] > 0:
+                            dims_batch = chunk_dims[local_s:local_e]
+                            poses_bp = chunk_poses_bp[local_s:local_e]
+                            valid_bp = chunk_valid_bp[local_s:local_e]
+                            imgs_half = F.avg_pool2d(
+                                chunk_pack[local_s:local_e].float(), kernel_size=2, stride=2
+                            )
+                            patches_bp, stds_bp, sharp_bp = _sample_patches_grouped(
+                                imgs_half,
+                                dims_batch.float(),
+                                poses_bp,
+                                canvas_size,
+                                grid_w=32,
+                                grid_h=24,
+                                supersample_2x=False,
+                                lap_kernel=lap_kernel,
+                                pose_chunk=304,
+                            )
+                            P = poses_bp.shape[1]
+                            patches_flat = patches_bp.view(B * P, 768)
+                            invalid_mask = (
+                                (~valid_bp)
+                                | (stds_bp < MIN_PATCH_STD)
+                                | (sharp_bp < (min_sharpness * 0.8))
+                            ).unsqueeze(-1)
+                            has_invalid = bool(invalid_mask.any().item())
+                            batch_best_scores = torch.empty((B, num_q), dtype=torch.float32, device=device)
+                            batch_best_poses = torch.empty((B, num_q, 6), dtype=torch.float32, device=device)
+                            for q0 in range(0, num_q, QUERY_TILE):
+                                q1 = min(num_q, q0 + QUERY_TILE)
+                                tile_scores = (patches_flat @ q32[q0:q1].T).view(B, P, q1 - q0)
+                                if has_invalid:
+                                    tile_scores.masked_fill_(invalid_mask, -2.0)
+                                tile_best, tile_loc = tile_scores.max(dim=1)
+                                batch_best_scores[:, q0:q1] = tile_best
+                                batch_best_poses[:, q0:q1, :] = poses_bp.gather(
+                                    1, tile_loc.unsqueeze(-1).expand(B, q1 - q0, 6)
+                                )
+                            acc_scores.append(batch_best_scores)
+                            acc_poses.append(batch_best_poses)
+
+                        if acc_scores and (len(acc_scores) >= flush_every or img_end == num_images):
+                            cand_s = torch.cat([top_scores, *acc_scores], dim=0)
+                            cand_p = torch.cat([top_poses, *acc_poses], dim=0)
+                            new_scores, new_idx = torch.topk(cand_s, k=TOPK_COARSE, dim=0)
+                            q_arange = torch.arange(num_q, device=device).unsqueeze(0).expand(TOPK_COARSE, num_q)
+                            top_scores = new_scores
+                            top_poses = cand_p[new_idx, q_arange]
+                            acc_scores.clear()
+                            acc_poses.clear()
             pbar.close()
 
             # Merge as-is and mirrored top-48 lists per textured frame, keeping top-32 distinct images.
@@ -824,6 +854,29 @@ def run_search(
                         )
                     entries.sort(key=lambda e: e["score_64"], reverse=True)
                     refined_per_tex[t_i] = entries
+
+    dark_pool: list[int] = []
+    bright_pool: list[int] = []
+    if need_solid_stats:
+        assert img_means is not None and img_stds is not None
+        if m_tex == 0:
+            for s in range(0, num_images, VRAM_CHUNK_IMGS):
+                e = min(num_images, s + VRAM_CHUNK_IMGS)
+                block = np.asarray(gray_np[s:e])
+                for offset_i, i in enumerate(range(s, e)):
+                    w, h = int(dims_np[i, 0]), int(dims_np[i, 1])
+                    patch = block[offset_i, :h, :w]
+                    img_means[i] = float(patch.mean())
+                    img_stds[i] = float(patch.std())
+        eligible_ids = [i for i in range(num_images) if eligible_mask[i]] or list(range(num_images))
+        dark_pool = sorted(
+            [i for i in eligible_ids if img_means[i] < 100.0],
+            key=lambda i: img_means[i] + 1.5 * img_stds[i],
+        ) or sorted(eligible_ids, key=lambda i: img_means[i])
+        bright_pool = sorted(
+            [i for i in eligible_ids if img_means[i] > 155.0],
+            key=lambda i: (255.0 - img_means[i]) + 1.5 * img_stds[i],
+        ) or sorted(eligible_ids, key=lambda i: -img_means[i])
 
     ant_gate: AntGate | None = None
     if min_ant_score > 0.0 and m_tex > 0:
@@ -980,6 +1033,7 @@ def run_search(
             "min_sharpness": min_sharpness,
             "max_center_offset": max_center_offset,
             "min_ant_score": min_ant_score,
+            "dedup_l1": dedup_l1,
             "indexed_images": num_images,
         },
         "frames": frame_records,

@@ -36,7 +36,9 @@ uv run python -m badapple_ants catalog --inat 6500 --antweb 3500
 # Or stream a local GBIF Darwin Core Archive (250k default, or pass higher quotas + --max-per-occ 0 for all views):
 uv run python -m badapple_ants catalog-dwca --inat 150000 --antweb 85000 --mcz 10000 --nmnh 5000
 uv run python -m badapple_ants download-thumbs --concurrency 32
-uv run python -m badapple_ants search --start 25 --duration 25 --cooldown 15 --max-reuse 6 --min-scale 0.65 --min-sharpness 0.25 --max-center-offset 0.14 --min-ant-score 0.50
+uv run python -m badapple_ants search --start 25 --duration 25 --cooldown 15 --max-reuse 6 --min-scale 0.65 --min-sharpness 0.25 --max-center-offset 0.14 --min-ant-score 0.50 --dedup-l1 1.2
+# Or search the full video from 0:00 to EOF by passing --start 0 --duration 0:
+uv run python -m badapple_ants search --start 0 --duration 0 --output output/full
 uv run python -m badapple_ants fetch-winners
 uv run python -m badapple_ants render --main-mode grayscale-stretch
 ```
@@ -46,12 +48,12 @@ uv run python -m badapple_ants render --main-mode grayscale-stretch
 | Path | Purpose |
 | --- | --- |
 | `badapple_ants/geometry.py` | Shared `(cx_frac, cy_frac, w_frac, theta, mirrored)` crop math, bounds clamping, PyTorch `grid_sample` grids, and Pillow `AFFINE` rendering |
-| `badapple_ants/media.py` | Pinned download & SHA-256 verification for `badapple.mp4` and Noto fonts, plus `30000/1001` fps frame extraction via `imageio-ffmpeg` |
+| `badapple_ants/media.py` | Pinned download & SHA-256 verification for `badapple.mp4` and Noto fonts, plus `30000/1001` fps frame extraction via `imageio-ffmpeg` (`--duration 0` for full video) |
 | `badapple_ants/catalog.py` | GBIF REST API and streaming DwC-A (`catalog-dwca`) catalog builder across iNaturalist, AntWeb, Harvard MCZ, and Smithsonian NMNH (filters labels, `ND`, and `--commercial-only`) |
 | `badapple_ants/download.py` | Per-host throttled async thumbnail downloader (sharded cache), low-RAM memmap `192x192` packer, and high-res winner fetcher |
 | `badapple_ants/ant_gate.py` | Batched GPU OpenCLIP (`ViT-B-32`) ant-presence gate rejecting empty backgrounds, glare, bokeh, hands, and labels |
-| `badapple_ants/search.py` | Memory-mapped / VRAM-chunked CUDA `32x24` NCC coarse search (`_generate_poses_batch_gpu` + zero-copy `96x96`-pooled `_sample_patches_grouped`), Laplacian sharpness & center-offset bounds, family-only filtering, `64x48` refinement, CLIP gating, and cooldown/reuse timeline selector |
-| `badapple_ants/render.py` | `1280x720` composite H.264/AAC renderer (with multi-script font fallback), diagnostic still exporter, and `CREDITS.txt` generator |
+| `badapple_ants/search.py` | Memory-mapped / VRAM-chunked CUDA `32x24` NCC coarse search (chunk prefetch, `_generate_poses_batch_gpu`, `96x96`-pooled `_sample_patches_grouped`, `QUERY_TILE=2048` query tiling), consecutive near-dup frame merging (`--dedup-l1`), sharpness & center-offset bounds, family-only filtering, `64x48` refinement, CLIP gating, and cooldown/reuse timeline selector |
+| `badapple_ants/render.py` | `1280x720` composite H.264/AAC renderer (with multi-script font fallback and parallel Pillow crop prefetch), diagnostic still exporter, and `CREDITS.txt` generator |
 | `badapple_ants/__main__.py` | CLI entry point (`python -m badapple_ants`) |
 | `tests/test_geometry.py`, `tests/test_catalog_download.py`, `tests/test_render_fonts.py`, `tests/test_search_filters.py` | Unit tests for GPU/Pillow alignment, license & label filters, DwC-A import, sharded cache packing, chunked refinement, font fallback, and anti-bokeh sharpness/scale bounds |
 | `PLANS.md` | Roadmap for grayscale main rendering, flash stabilization, anti-bokeh filtering, and full-video scaling |

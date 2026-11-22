@@ -231,3 +231,15 @@ def test_sample_patches_grouped_matches_legacy() -> None:
     assert torch.allclose(p_grp[b_idx, p_idx], p_leg, atol=1e-5)
     assert torch.allclose(std_grp[b_idx, p_idx], std_leg, atol=1e-5)
     assert torch.allclose(sh_grp[b_idx, p_idx], sh_leg, atol=1e-5)
+
+
+def test_trimmed_mid_scale_pose_count() -> None:
+    arr = _generate_image_poses(
+        0,
+        w=192,
+        h=144,
+        scales=_coarse_scales(0.65),
+        max_center_offset=MAX_CENTER_OFFSET,
+    )
+    # 16 centered poses each for 0.94 and 0.795, plus up to 144 shifted poses at 0.65 -> <= 176 total
+    assert 0 < arr.shape[0] <= 176

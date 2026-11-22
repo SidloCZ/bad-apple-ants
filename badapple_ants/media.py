@@ -117,26 +117,25 @@ def extract_clip_frames(
     clip_dir.mkdir(parents=True, exist_ok=True)
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     vf = f"fps={TARGET_FPS},scale={w}:{h}:flags=lanczos,setsar=1,format=gray"
-    cmd = [
-        ffmpeg_exe,
-        "-v",
-        "error",
-        "-nostdin",
-        "-ss",
-        f"{start_s:.4f}",
-        "-t",
-        f"{duration_s:.4f}",
-        "-i",
-        str(video_path),
-        "-an",
-        "-vf",
-        vf,
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "gray",
-        "pipe:1",
-    ]
+    cmd = [ffmpeg_exe, "-v", "error", "-nostdin"]
+    if start_s > 0.0:
+        cmd.extend(["-ss", f"{start_s:.4f}"])
+    if duration_s > 0.0:
+        cmd.extend(["-t", f"{duration_s:.4f}"])
+    cmd.extend(
+        [
+            "-i",
+            str(video_path),
+            "-an",
+            "-vf",
+            vf,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "pipe:1",
+        ]
+    )
     frame_bytes = w * h
     frames: list[np.ndarray] = []
     partial_raw = clip_dir / "frames.u8.part"

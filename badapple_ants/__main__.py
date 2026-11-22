@@ -10,7 +10,13 @@ from .catalog import build_catalog, build_catalog_dwca
 from .download import download_thumbs, download_winners
 from .media import fetch_media
 from .render import MAIN_MODES, render_video
-from .search import MAX_CENTER_OFFSET, MIN_FIT_RATIO, MIN_SHARPNESS_RATIO, run_search
+from .search import (
+    DEFAULT_DEDUP_L1,
+    MAX_CENTER_OFFSET,
+    MIN_FIT_RATIO,
+    MIN_SHARPNESS_RATIO,
+    run_search,
+)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -57,6 +63,7 @@ def main(argv: list[str] | None = None) -> None:
     p_search.add_argument("--min-sharpness", type=float, default=MIN_SHARPNESS_RATIO)
     p_search.add_argument("--max-center-offset", type=float, default=MAX_CENTER_OFFSET)
     p_search.add_argument("--min-ant-score", type=float, default=MIN_ANT_SCORE)
+    p_search.add_argument("--dedup-l1", type=float, default=DEFAULT_DEDUP_L1)
     p_search.add_argument("--max-images", type=int, default=0)
 
     p_win = sub.add_parser("fetch-winners", help="Download full-resolution photos for winning matches")
@@ -86,6 +93,7 @@ def main(argv: list[str] | None = None) -> None:
     p_all.add_argument("--min-sharpness", type=float, default=MIN_SHARPNESS_RATIO)
     p_all.add_argument("--max-center-offset", type=float, default=MAX_CENTER_OFFSET)
     p_all.add_argument("--min-ant-score", type=float, default=MIN_ANT_SCORE)
+    p_all.add_argument("--dedup-l1", type=float, default=DEFAULT_DEDUP_L1)
     p_all.add_argument("--main-mode", choices=MAIN_MODES, default="grayscale-stretch")
 
     args = parser.parse_args(argv)
@@ -126,6 +134,7 @@ def main(argv: list[str] | None = None) -> None:
             min_sharpness=args.min_sharpness,
             max_center_offset=args.max_center_offset,
             min_ant_score=args.min_ant_score,
+            dedup_l1=args.dedup_l1,
             max_images=args.max_images,
         )
     elif args.command == "fetch-winners":
@@ -157,6 +166,7 @@ def main(argv: list[str] | None = None) -> None:
             min_sharpness=args.min_sharpness,
             max_center_offset=args.max_center_offset,
             min_ant_score=args.min_ant_score,
+            dedup_l1=args.dedup_l1,
         )
         download_winners(args.output / "matches.json", args.cache)
         render_video(

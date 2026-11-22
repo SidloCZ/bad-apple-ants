@@ -7,6 +7,7 @@ import math
 import subprocess
 import tempfile
 from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -220,23 +221,61 @@ def _format_source(item: dict) -> str:
     return f"Source: {src}"
 
 
-class _ImageLRU:
-    def __init__(self, max_items: int = 48):
-        self.max_items = max_items
-        self._cache: OrderedDict[str, Image.Image] = OrderedDict()
+def _frame_img_path(fr: dict, resolved_map: dict[str, str]) -> Path:
+    item = fr["item"]
+    raw_path = resolved_map.get(item["id"]) or item.get("thumb_path") or ""
+    img_path = Path(raw_path.replace("\\", "/"))
+    if img_path.is_file():
+        return img_path
+    thumb_raw = item.get("thumb_path") or ""
+    p_thumb = Path(thumb_raw.replace("\\", "/"))
+    return p_thumb if p_thumb.is_file() else Path(raw_path)
 
-    def get(self, path: Path) -> Image.Image:
-        key = str(path)
-        img = self._cache.get(key)
-        if img is not None:
-            self._cache.move_to_end(key)
-            return img
-        with Image.open(path) as raw:
-            loaded = ImageOps.exif_transpose(raw).convert("RGB")
-        self._cache[key] = loaded
-        if len(self._cache) > self.max_items:
-            self._cache.popitem(last=False)
-        return loaded
+
+def _frame_crop_key(fr: dict) -> tuple:
+    pose = fr["pose"]
+    return (
+        fr["item"]["id"],
+        round(pose["cx_frac"], 6),
+        round(pose["cy_frac"], 6),
+        round(pose["w_frac"], 6),
+        round(pose["theta"], 6),
+        bool(pose["mirrored"]),
+    )
+
+
+def _render_panel_pair(
+    img_path: Path,
+    pose: dict,
+    main_mode: str,
+) -> tuple[Image.Image, Image.Image]:
+    """Load, orient, and warp a single match photo into (main_panel, sidebar_preview)."""
+    with Image.open(img_path) as raw:
+        src_img = ImageOps.exif_transpose(raw).convert("RGB")
+    color_crop = render_crop(
+        src_img,
+        MAIN_W,
+        MAIN_H,
+        pose["cx_frac"],
+        pose["cy_frac"],
+        pose["w_frac"],
+        pose["theta"],
+        bool(pose["mirrored"]),
+    )
+    if main_mode == "color":
+        side_prev = (
+            color_crop.convert("L")
+            .resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
+            .convert("RGB")
+        )
+        return color_crop, side_prev
+
+    gray_l = color_crop.convert("L")
+    if main_mode == "grayscale-stretch":
+        gray_l = _stretch_grayscale(gray_l)
+    main_panel = gray_l.convert("RGB")
+    side_prev = color_crop.resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
+    return main_panel, side_prev
 
 
 def _write_credits(frames: list[dict], out_path: Path) -> None:
@@ -329,8 +368,8 @@ def render_video(
         still_targets[best_i] = f"still_f{best_i:04d}_best_ncc.png"
         still_targets[worst_i] = f"still_f{worst_i:04d}_worst_ncc.png"
 
-    lru = _ImageLRU(max_items=48)
     ncc_history = [0.0 if fr.get("is_solid") else float(fr["score_64"]) for fr in frames]
+    frame_digits = max(3, len(str(n)))
 
     mp4_path = output_dir / "badapple-ants-proto.mp4"
     part_mp4 = output_dir / "badapple-ants-proto.part.mp4"
@@ -351,88 +390,76 @@ def render_video(
         TARGET_FPS,
         "-i",
         "pipe:0",
-        "-ss",
-        f"{start_s:.4f}",
-        "-t",
-        f"{duration_s:.4f}",
-        "-i",
-        str(video_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        "-c:v",
-        "libx264",
-        "-crf",
-        "18",
-        "-preset",
-        "medium",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-        str(part_mp4),
     ]
+    if start_s > 0.0:
+        cmd.extend(["-ss", f"{start_s:.4f}"])
+    if duration_s > 0.0:
+        cmd.extend(["-t", f"{duration_s:.4f}"])
+    cmd.extend(
+        [
+            "-i",
+            str(video_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-preset",
+            "medium",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            str(part_mp4),
+        ]
+    )
 
-    last_crop_key: tuple | None = None
     last_main_panel: Image.Image | None = None
     last_side_prev: Image.Image | None = None
     side_label = "GRAYSCALE MATCH" if main_mode == "color" else "COLOR MATCH"
 
-    with tempfile.TemporaryFile() as err_log:
+    with tempfile.TemporaryFile() as err_log, ThreadPoolExecutor(max_workers=4) as crop_pool:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err_log)
         try:
             assert proc.stdin is not None
-            for t, fr in enumerate(tqdm(frames, desc="render", unit="frame")):
-                item = fr["item"]
-                pose = fr["pose"]
-                img_path_str = resolved_map.get(item["id"]) or item.get("thumb_path") or ""
-                img_path = Path(img_path_str)
-                if not img_path.is_file():
-                    img_path = Path(item["thumb_path"])
+            pending: dict[int, Future[tuple[Image.Image, Image.Image]]] = {}
+            submit_idx = 0
+            last_sub_key: tuple | None = None
+            prefetch_window = 16
 
-                crop_key = (
-                    item["id"],
-                    round(pose["cx_frac"], 6),
-                    round(pose["cy_frac"], 6),
-                    round(pose["w_frac"], 6),
-                    round(pose["theta"], 6),
-                    bool(pose["mirrored"]),
-                )
-                if crop_key == last_crop_key and last_main_panel is not None and last_side_prev is not None:
-                    main_panel = last_main_panel
-                    side_prev = last_side_prev
-                else:
-                    src_img = lru.get(img_path)
-                    color_crop = render_crop(
-                        src_img,
-                        MAIN_W,
-                        MAIN_H,
-                        pose["cx_frac"],
-                        pose["cy_frac"],
-                        pose["w_frac"],
-                        pose["theta"],
-                        bool(pose["mirrored"]),
-                    )
-                    if main_mode == "color":
-                        main_panel = color_crop
-                        side_prev = (
-                            color_crop.convert("L")
-                            .resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
-                            .convert("RGB")
+            def _fill_prefetch() -> None:
+                nonlocal submit_idx, last_sub_key
+                while submit_idx < n and len(pending) < prefetch_window:
+                    sub_fr = frames[submit_idx]
+                    sub_key = _frame_crop_key(sub_fr)
+                    if sub_key != last_sub_key:
+                        img_path = _frame_img_path(sub_fr, resolved_map)
+                        pending[submit_idx] = crop_pool.submit(
+                            _render_panel_pair, img_path, sub_fr["pose"], main_mode
                         )
-                    else:
-                        gray_l = color_crop.convert("L")
-                        if main_mode == "grayscale-stretch":
-                            gray_l = _stretch_grayscale(gray_l)
-                        main_panel = gray_l.convert("RGB")
-                        side_prev = color_crop.resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
-                    last_crop_key = crop_key
+                        last_sub_key = sub_key
+                    submit_idx += 1
+
+            for t, fr in enumerate(tqdm(frames, desc="render", unit="frame")):
+                _fill_prefetch()
+                fut = pending.pop(t, None)
+                if fut is not None:
+                    main_panel, side_prev = fut.result()
                     last_main_panel = main_panel
                     last_side_prev = side_prev
+                else:
+                    assert last_main_panel is not None and last_side_prev is not None
+                    main_panel = last_main_panel
+                    side_prev = last_side_prev
+
+                item = fr["item"]
+                pose = fr["pose"]
 
                 canvas = Image.new("RGB", (OUT_W, OUT_H), (18, 19, 22))
                 canvas.paste(main_panel, (0, 0))
@@ -498,7 +525,7 @@ def render_video(
                 lic = item.get("license") or "Unknown"
                 credit_txt = font_meta.truncate(draw, f"{creator} | {lic}", PREV_W)
                 stats_txt = (
-                    f"SCALE {scale_pct:3d}%  ROT {rot_deg:3d}d{mir_tag}  F {t + 1:03d}/{n}"
+                    f"SCALE {scale_pct:3d}%  ROT {rot_deg:3d}d{mir_tag}  F {t + 1:0{frame_digits}d}/{n}"
                 )
 
                 font_taxon.draw_text(draw, (x0, 592), taxon_txt, fill=(243, 244, 246))
