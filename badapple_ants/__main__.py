@@ -9,7 +9,7 @@ from .ant_gate import MIN_ANT_SCORE
 from .catalog import build_catalog, build_catalog_dwca
 from .download import download_thumbs, download_winners
 from .media import fetch_media
-from .render import MAIN_MODES, render_video
+from .render import MAIN_MODES, RESOLUTION_SCALES, render_video
 from .search import (
     DEFAULT_DEDUP_L1,
     MAX_CENTER_OFFSET,
@@ -71,13 +71,18 @@ def main(argv: list[str] | None = None) -> None:
     p_win.add_argument("--cache", type=Path, default=Path("cache"))
     p_win.add_argument("--concurrency", type=int, default=12)
 
-    p_ren = sub.add_parser("render", help="Render 1280x720 video, credits, and diagnostic stills")
+    p_ren = sub.add_parser("render", help="Render 720p/1440p/4K video, credits, and diagnostic stills")
     p_ren.add_argument("--matches", type=Path, default=Path("output/proto/matches.json"))
     p_ren.add_argument("--video", type=Path, default=Path("assets/badapple.mp4"))
     p_ren.add_argument("--assets", type=Path, default=Path("assets"))
     p_ren.add_argument("--cache", type=Path, default=Path("cache"))
     p_ren.add_argument("--output", type=Path, default=Path("output/proto"))
     p_ren.add_argument("--main-mode", choices=MAIN_MODES, default="grayscale-stretch")
+    p_ren.add_argument("--resolution", choices=tuple(RESOLUTION_SCALES.keys()), default="720p")
+    p_ren.add_argument("--crf", type=int, default=18)
+    p_ren.add_argument("--preset", type=str, default="medium")
+    p_ren.add_argument("--preview-start", type=float, default=0.0)
+    p_ren.add_argument("--preview-duration", type=float, default=0.0)
 
     p_all = sub.add_parser("run-all", help="Run every prototype stage end-to-end")
     p_all.add_argument("--assets", type=Path, default=Path("assets"))
@@ -147,6 +152,11 @@ def main(argv: list[str] | None = None) -> None:
             args.cache,
             args.output,
             main_mode=args.main_mode,
+            resolution=args.resolution,
+            crf=args.crf,
+            preset=args.preset,
+            preview_start_s=args.preview_start,
+            preview_duration_s=args.preview_duration,
         )
     elif args.command == "run-all":
         fetch_media(args.assets)

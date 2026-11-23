@@ -30,11 +30,23 @@ FONTS = [
         "f5f552c8c5edb61fe6efb824baf4d4de47b1a8689ab4925ff43f7bd6a4ebece5",
     ),
     (
+        NOTO_BASE + "NotoSans/full/ttf/NotoSans-Italic.ttf",
+        "fonts/NotoSans-Italic.ttf",
+        "126522ae1bb9cd92120287fc47dfc74ef981e73931d93e52c565fb7e09b2d74a",
+    ),
+    (
         NOTO_BASE + "NotoSansMono/unhinted/ttf/NotoSansMono-Regular.ttf",
         "fonts/NotoSansMono-Regular.ttf",
         "87f8ce0522a6c99b743ee5fc75b4073cfdd575639119672828b7b9944b65b4f4",
     ),
 ]
+
+WORLD_MAP = (
+    "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/"
+    "geojson/ne_110m_land.geojson",
+    "world_land_110m.geojson",
+    "9e0729ee253ca7d7a5c4ae9395fb1902264c5377c52e224d13dd85010e2835d9",
+)
 
 TARGET_FPS = "30000/1001"
 
@@ -66,9 +78,9 @@ def _download_verified(url: str, path: Path, expected_sha256: str) -> Path:
 
 
 def fetch_media(assets_dir: Path) -> dict[str, Path]:
-    """Download pinned badapple.mp4 and Noto fonts into assets_dir."""
+    """Download pinned badapple.mp4, Noto fonts, and Natural Earth land map into assets_dir."""
     paths: dict[str, Path] = {}
-    for url, rel, digest in [VIDEO, *FONTS]:
+    for url, rel, digest in [VIDEO, *FONTS, WORLD_MAP]:
         out_path = _download_verified(url, assets_dir / rel, digest)
         paths[rel] = out_path
     return paths

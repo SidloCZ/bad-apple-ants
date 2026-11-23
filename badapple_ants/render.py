@@ -1,4 +1,4 @@
-"""Render 1280x720 Bad Apple!! Ants composite MP4, diagnostic stills, and credits."""
+"""Render Bad Apple!! Ants composite MP4 (720p/1440p/4K), diagnostic stills, and credits."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import json
 import math
 import subprocess
 import tempfile
-from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
@@ -24,7 +23,13 @@ SIDE_X = 960
 PAD = 16
 PREV_W, PREV_H = 288, 216
 CHART_W, CHART_H = 288, 56
+MAP_W, MAP_H = 112, 56
 
+RESOLUTION_SCALES = {
+    "720p": 1,
+    "1440p": 2,
+    "4k": 3,
+}
 
 MAIN_MODES = ("grayscale", "grayscale-stretch", "color")
 
@@ -57,6 +62,13 @@ _FALLBACK_FONT_PATHS = (
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 )
 
+_ITALIC_FALLBACK_FONT_PATHS = (
+    "C:/Windows/Fonts/segoeuii.ttf",
+    "C:/Windows/Fonts/ariali.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Italic.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+)
+
 
 class FontChain:
     """Ordered font list supporting per-character script fallback for non-Latin names."""
@@ -87,7 +99,12 @@ class FontChain:
         add_path(assets_dir / "fonts" / filename)
         if "Mono" in filename:
             add_path(Path("C:/Windows/Fonts/consola.ttf"))
-        for rel_or_abs in _FALLBACK_FONT_PATHS:
+        fallbacks = (
+            (*_ITALIC_FALLBACK_FONT_PATHS, *_FALLBACK_FONT_PATHS)
+            if "Italic" in filename
+            else _FALLBACK_FONT_PATHS
+        )
+        for rel_or_abs in fallbacks:
             p = Path(rel_or_abs)
             if not p.is_absolute():
                 p = assets_dir / "fonts" / p
@@ -207,6 +224,195 @@ def _format_taxon(item: dict) -> str:
     return "Formicidae"
 
 
+def _split_taxon_runs(item: dict) -> list[tuple[str, bool]]:
+    """Split taxon label into (text, is_italic) runs following binomial nomenclature rules."""
+    species = (item.get("species") or "").strip()
+    if species:
+        return [(species, True)]
+    genus = (item.get("genus") or "").strip()
+    if genus:
+        return [(genus, True), (" sp.", False)]
+    return [("Formicidae", False)]
+
+
+def _draw_taxon(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    item: dict,
+    font_italic: FontChain,
+    font_regular: FontChain,
+    max_w: int,
+    fill: tuple[int, int, int],
+) -> None:
+    """Draw taxonomic label with italic binomial/genus and upright 'sp.' or family rank."""
+    runs = _split_taxon_runs(item)
+    if len(runs) == 1:
+        text, is_it = runs[0]
+        chain = font_italic if is_it else font_regular
+        chain.draw_text(draw, xy, chain.truncate(draw, text, max_w), fill=fill)
+        return
+
+    genus, _ = runs[0]
+    suffix, _ = runs[1]
+    suffix_w = font_regular.textlength(draw, suffix)
+    if font_italic.textlength(draw, genus) + suffix_w <= max_w:
+        font_italic.draw_text(draw, xy, genus, fill=fill)
+        gx = xy[0] + int(round(font_italic.textlength(draw, genus)))
+        font_regular.draw_text(draw, (gx, xy[1]), suffix, fill=fill)
+    elif suffix_w < max_w:
+        genus_trunc = font_italic.truncate(draw, genus, max(0, int(max_w - suffix_w)))
+        font_italic.draw_text(draw, xy, genus_trunc, fill=fill)
+        gx = xy[0] + int(round(font_italic.textlength(draw, genus_trunc)))
+        font_regular.draw_text(draw, (gx, xy[1]), suffix, fill=fill)
+    else:
+        font_italic.draw_text(draw, xy, font_italic.truncate(draw, genus + suffix, max_w), fill=fill)
+
+
+def _project_lat_lon(
+    lat: float,
+    lon: float,
+    map_w: int,
+    map_h: int,
+    margin: float = 0.0,
+) -> tuple[float, float]:
+    """Equirectangular projection of (lat, lon) onto pixel coordinates within map_w x map_h."""
+    lat_c = min(90.0, max(-90.0, float(lat)))
+    lon_c = min(180.0, max(-180.0, float(lon)))
+    px = ((lon_c + 180.0) / 360.0) * float(max(1, map_w - 1))
+    py = ((90.0 - lat_c) / 180.0) * float(max(1, map_h - 1))
+    if margin > 0.0:
+        px = min(max(margin, px), max(margin, float(map_w - 1) - margin))
+        py = min(max(margin, py), max(margin, float(map_h - 1) - margin))
+    return px, py
+
+
+def _build_world_map_base(
+    assets_dir: Path,
+    map_w: int,
+    map_h: int,
+    scale: int,
+) -> Image.Image:
+    """Pre-render static equirectangular mini world map with 2x supersampled Natural Earth land polygons."""
+    ss = 2
+    sw, sh = map_w * ss, map_h * ss
+    bg_color = (24, 26, 32)
+    grid_color = (32, 35, 43)
+    land_fill = (62, 70, 84)
+    land_outline = (78, 88, 104)
+    border_color = (42, 45, 52)
+
+    hi = Image.new("RGB", (sw, sh), bg_color)
+    hi_draw = ImageDraw.Draw(hi)
+
+    eq_y = int(round(_project_lat_lon(0.0, 0.0, sw, sh)[1]))
+    pm_x = int(round(_project_lat_lon(0.0, 0.0, sw, sh)[0]))
+    hi_draw.line((0, eq_y, sw - 1, eq_y), fill=grid_color, width=max(1, scale))
+    hi_draw.line((pm_x, 0, pm_x, sh - 1), fill=grid_color, width=max(1, scale))
+
+    geojson_path = assets_dir / "world_land_110m.geojson"
+    if geojson_path.is_file():
+        geo = json.loads(geojson_path.read_text(encoding="utf-8"))
+        for feat in geo.get("features", []):
+            geom = feat.get("geometry") or {}
+            gtype = geom.get("type")
+            coords = geom.get("coordinates") or []
+            if gtype == "Polygon":
+                polys = [coords]
+            elif gtype == "MultiPolygon":
+                polys = coords
+            else:
+                continue
+            for poly in polys:
+                if not poly:
+                    continue
+                outer = [_project_lat_lon(pt[1], pt[0], sw, sh) for pt in poly[0]]
+                if len(outer) >= 3:
+                    hi_draw.polygon(outer, fill=land_fill, outline=land_outline)
+                for hole in poly[1:]:
+                    inner = [_project_lat_lon(pt[1], pt[0], sw, sh) for pt in hole]
+                    if len(inner) >= 3:
+                        hi_draw.polygon(inner, fill=bg_color, outline=land_outline)
+
+    base = hi.resize((map_w, map_h), Image.Resampling.LANCZOS)
+    draw = ImageDraw.Draw(base)
+    draw.rectangle((0, 0, map_w - 1, map_h - 1), outline=border_color, width=max(1, scale))
+    return base
+
+
+def _build_glow_dot_sprite(scale: int) -> Image.Image:
+    """Create a pre-rendered RGBA golden-yellow glowing marker sprite scaled for the target resolution."""
+    r_glow = max(6, int(round(8.0 * scale)))
+    size = 2 * r_glow + 1
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    dist = np.sqrt((xx - float(r_glow)) ** 2 + (yy - float(r_glow)) ** 2)
+
+    glow_t = np.clip(1.0 - dist / float(r_glow), 0.0, 1.0)
+    alpha = 160.0 * (glow_t ** 2)
+    rgb = np.zeros((size, size, 3), dtype=np.float32)
+    rgb[..., 0] = 250.0
+    rgb[..., 1] = 204.0
+    rgb[..., 2] = 21.0
+
+    r_dot = 2.2 * float(scale)
+    dot_cov = np.clip((r_dot + 0.6 - dist) / 1.2, 0.0, 1.0)
+    alpha = np.maximum(alpha, 255.0 * dot_cov)
+
+    r_hot = 0.9 * float(scale)
+    hot_cov = np.clip((r_hot + 0.5 - dist) / 1.0, 0.0, 1.0)
+    rgb[..., 0] = rgb[..., 0] * (1.0 - hot_cov) + 255.0 * hot_cov
+    rgb[..., 1] = rgb[..., 1] * (1.0 - hot_cov) + 252.0 * hot_cov
+    rgb[..., 2] = rgb[..., 2] * (1.0 - hot_cov) + 230.0 * hot_cov
+
+    rgba = np.empty((size, size, 4), dtype=np.uint8)
+    rgba[..., :3] = np.clip(rgb, 0.0, 255.0).astype(np.uint8)
+    rgba[..., 3] = np.clip(alpha, 0.0, 255.0).astype(np.uint8)
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+def _draw_map_dot(
+    canvas: Image.Image,
+    map_x: int,
+    map_y: int,
+    map_w: int,
+    map_h: int,
+    scale: int,
+    item: dict,
+    glow_sprite: Image.Image,
+) -> None:
+    """Composite glowing yellow specimen origin dot onto the mini world map if coordinates exist."""
+    lat = item.get("lat")
+    lon = item.get("lon")
+    if lat is None or lon is None:
+        return
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return
+    if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
+        return
+
+    b = max(1, scale)
+    px_rel, py_rel = _project_lat_lon(lat_f, lon_f, map_w, map_h, margin=float(b + 2 * scale))
+    half = glow_sprite.width // 2
+    gx0 = map_x + int(round(px_rel)) - half
+    gy0 = map_y + int(round(py_rel)) - half
+    gx1 = gx0 + glow_sprite.width
+    gy1 = gy0 + glow_sprite.height
+
+    inner_x0, inner_y0 = map_x + b, map_y + b
+    inner_x1, inner_y1 = map_x + map_w - b, map_y + map_h - b
+    cx0 = max(gx0, inner_x0)
+    cy0 = max(gy0, inner_y0)
+    cx1 = min(gx1, inner_x1)
+    cy1 = min(gy1, inner_y1)
+    if cx1 <= cx0 or cy1 <= cy0:
+        return
+
+    sprite_crop = glow_sprite.crop((cx0 - gx0, cy0 - gy0, cx1 - gx0, cy1 - gy0))
+    canvas.paste(sprite_crop, (cx0, cy0), sprite_crop)
+
+
 def _format_source(item: dict) -> str:
     src = item.get("source") or ""
     view = item.get("view") or ""
@@ -248,14 +454,18 @@ def _render_panel_pair(
     img_path: Path,
     pose: dict,
     main_mode: str,
+    main_w: int = MAIN_W,
+    main_h: int = MAIN_H,
+    prev_w: int = PREV_W,
+    prev_h: int = PREV_H,
 ) -> tuple[Image.Image, Image.Image]:
     """Load, orient, and warp a single match photo into (main_panel, sidebar_preview)."""
     with Image.open(img_path) as raw:
         src_img = ImageOps.exif_transpose(raw).convert("RGB")
     color_crop = render_crop(
         src_img,
-        MAIN_W,
-        MAIN_H,
+        main_w,
+        main_h,
         pose["cx_frac"],
         pose["cy_frac"],
         pose["w_frac"],
@@ -265,7 +475,7 @@ def _render_panel_pair(
     if main_mode == "color":
         side_prev = (
             color_crop.convert("L")
-            .resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
+            .resize((prev_w, prev_h), Image.Resampling.LANCZOS)
             .convert("RGB")
         )
         return color_crop, side_prev
@@ -274,7 +484,7 @@ def _render_panel_pair(
     if main_mode == "grayscale-stretch":
         gray_l = _stretch_grayscale(gray_l)
     main_panel = gray_l.convert("RGB")
-    side_prev = color_crop.resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
+    side_prev = color_crop.resize((prev_w, prev_h), Image.Resampling.LANCZOS)
     return main_panel, side_prev
 
 
@@ -289,8 +499,8 @@ def _write_credits(frames: list[dict], out_path: Path) -> None:
             seen[iid] = item
 
     lines = [
-        "Bad Apple!! Ants Prototype - Image Credits",
-        "==========================================",
+        "Bad Apple!! Ants - Image Credits",
+        "================================",
         f"Total frames: {len(frames)}",
         f"Unique ant photographs used: {len(seen)}",
         "",
@@ -320,10 +530,29 @@ def render_video(
     cache_dir: Path,
     output_dir: Path,
     main_mode: str = "grayscale-stretch",
+    resolution: str = "720p",
+    crf: int = 18,
+    preset: str = "medium",
+    preview_start_s: float = 0.0,
+    preview_duration_s: float = 0.0,
 ) -> Path:
-    """Render 1280x720 MP4 with sidebar previews, NCC sparkline, credits, and stills."""
+    """Render 720p/1440p/4K MP4 with sidebar previews, NCC sparkline, mini map, credits, and stills."""
     if main_mode not in MAIN_MODES:
         raise ValueError(f"Unsupported main_mode={main_mode!r}; expected one of {MAIN_MODES}")
+    if resolution not in RESOLUTION_SCALES:
+        raise ValueError(
+            f"Unsupported resolution={resolution!r}; expected one of {tuple(RESOLUTION_SCALES.keys())}"
+        )
+
+    s = RESOLUTION_SCALES[resolution]
+    out_w, out_h = OUT_W * s, OUT_H * s
+    main_w, main_h = MAIN_W * s, MAIN_H * s
+    side_x = SIDE_X * s
+    pad = PAD * s
+    prev_w, prev_h = PREV_W * s, PREV_H * s
+    chart_w, chart_h = CHART_W * s, CHART_H * s
+    map_w, map_h = MAP_W * s, MAP_H * s
+    border_w = max(1, s)
 
     payload = json.loads(matches_path.read_text(encoding="utf-8"))
     frames = payload["frames"]
@@ -342,10 +571,28 @@ def render_video(
             f"Frame count mismatch: matches={len(frames)} vs extracted={len(orig_frames_u8)}"
         )
 
-    font_label = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 12)
-    font_taxon = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 15)
-    font_meta = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 12)
-    font_stats = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 11)
+    n_total = len(frames)
+    fps_num, fps_den = (int(p) for p in TARGET_FPS.split("/"))
+    fps_val = float(fps_num) / float(fps_den)
+    if preview_duration_s > 0.0:
+        slice_start_idx = min(n_total - 1, max(0, int(round(preview_start_s * fps_val))))
+        slice_count = max(1, int(round(preview_duration_s * fps_val)))
+        slice_end_idx = min(n_total, slice_start_idx + slice_count)
+    else:
+        slice_start_idx = 0
+        slice_end_idx = n_total
+    render_indices = list(range(slice_start_idx, slice_end_idx))
+    if not render_indices:
+        raise RuntimeError("No frames selected for rendering")
+
+    font_label = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 12 * s)
+    font_taxon_italic = FontChain.load(assets_dir, "NotoSans-Italic.ttf", 15 * s)
+    font_taxon_regular = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 15 * s)
+    font_meta = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 11 * s)
+    font_stats = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 11 * s)
+
+    map_base = _build_world_map_base(assets_dir, map_w, map_h, s)
+    glow_sprite = _build_glow_dot_sprite(s)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     stills_dir = output_dir / "stills"
@@ -355,13 +602,14 @@ def render_video(
 
     _write_credits(frames, output_dir / "CREDITS.txt")
 
-    # Select diagnostic frames: 10%, 35%, 65%, 90% + best/worst textured NCC.
-    n = len(frames)
+    # Select diagnostic frames across the rendered range: 10%, 35%, 65%, 90% + best/worst textured NCC.
     still_targets: dict[int, str] = {}
+    m_render = len(render_indices)
     for pct in (10, 35, 65, 90):
-        idx = min(n - 1, max(0, int(round((pct / 100.0) * (n - 1)))))
+        rel = min(m_render - 1, max(0, int(round((pct / 100.0) * (m_render - 1)))))
+        idx = render_indices[rel]
         still_targets.setdefault(idx, f"still_f{idx:04d}_p{pct}.png")
-    tex_indices = [i for i, fr in enumerate(frames) if not fr.get("is_solid")]
+    tex_indices = [i for i in render_indices if not frames[i].get("is_solid")]
     if tex_indices:
         best_i = max(tex_indices, key=lambda i: frames[i]["score_64"])
         worst_i = min(tex_indices, key=lambda i: frames[i]["score_64"])
@@ -369,10 +617,11 @@ def render_video(
         still_targets[worst_i] = f"still_f{worst_i:04d}_worst_ncc.png"
 
     ncc_history = [0.0 if fr.get("is_solid") else float(fr["score_64"]) for fr in frames]
-    frame_digits = max(3, len(str(n)))
+    frame_digits = max(3, len(str(n_total)))
 
-    mp4_path = output_dir / "badapple-ants-proto.mp4"
-    part_mp4 = output_dir / "badapple-ants-proto.part.mp4"
+    stem = f"badapple-ants-{resolution}-preview" if preview_duration_s > 0.0 else f"badapple-ants-{resolution}"
+    mp4_path = output_dir / f"{stem}.mp4"
+    part_mp4 = output_dir / f"{stem}.part.mp4"
     ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [
         ffmpeg_exe,
@@ -385,16 +634,18 @@ def render_video(
         "-pix_fmt",
         "rgb24",
         "-s",
-        f"{OUT_W}x{OUT_H}",
+        f"{out_w}x{out_h}",
         "-r",
         TARGET_FPS,
         "-i",
         "pipe:0",
     ]
-    if start_s > 0.0:
-        cmd.extend(["-ss", f"{start_s:.4f}"])
-    if duration_s > 0.0:
-        cmd.extend(["-t", f"{duration_s:.4f}"])
+    audio_ss = start_s + (slice_start_idx / fps_val if preview_duration_s > 0.0 else 0.0)
+    audio_t = (slice_end_idx - slice_start_idx) / fps_val if preview_duration_s > 0.0 else duration_s
+    if audio_ss > 0.0:
+        cmd.extend(["-ss", f"{audio_ss:.4f}"])
+    if audio_t > 0.0:
+        cmd.extend(["-t", f"{audio_t:.4f}"])
     cmd.extend(
         [
             "-i",
@@ -406,11 +657,13 @@ def render_video(
             "-c:v",
             "libx264",
             "-crf",
-            "18",
+            str(int(crf)),
             "-preset",
-            "medium",
+            preset,
             "-pix_fmt",
             "yuv420p",
+            "-movflags",
+            "+faststart",
             "-c:a",
             "aac",
             "-b:a",
@@ -422,31 +675,39 @@ def render_video(
 
     last_main_panel: Image.Image | None = None
     last_side_prev: Image.Image | None = None
-    side_label = "GRAYSCALE MATCH" if main_mode == "color" else "COLOR MATCH"
+    side_label = "GRAYSCALE MATCH" if main_mode == "color" else "ORIGINAL PHOTO"
 
     with tempfile.TemporaryFile() as err_log, ThreadPoolExecutor(max_workers=4) as crop_pool:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err_log)
         try:
             assert proc.stdin is not None
             pending: dict[int, Future[tuple[Image.Image, Image.Image]]] = {}
-            submit_idx = 0
+            submit_pos = 0
             last_sub_key: tuple | None = None
             prefetch_window = 16
 
             def _fill_prefetch() -> None:
-                nonlocal submit_idx, last_sub_key
-                while submit_idx < n and len(pending) < prefetch_window:
-                    sub_fr = frames[submit_idx]
+                nonlocal submit_pos, last_sub_key
+                while submit_pos < m_render and len(pending) < prefetch_window:
+                    sub_t = render_indices[submit_pos]
+                    sub_fr = frames[sub_t]
                     sub_key = _frame_crop_key(sub_fr)
                     if sub_key != last_sub_key:
                         img_path = _frame_img_path(sub_fr, resolved_map)
-                        pending[submit_idx] = crop_pool.submit(
-                            _render_panel_pair, img_path, sub_fr["pose"], main_mode
+                        pending[sub_t] = crop_pool.submit(
+                            _render_panel_pair,
+                            img_path,
+                            sub_fr["pose"],
+                            main_mode,
+                            main_w,
+                            main_h,
+                            prev_w,
+                            prev_h,
                         )
                         last_sub_key = sub_key
-                    submit_idx += 1
+                    submit_pos += 1
 
-            for t, fr in enumerate(tqdm(frames, desc="render", unit="frame")):
+            for t in tqdm(render_indices, desc=f"render-{resolution}", unit="frame"):
                 _fill_prefetch()
                 fut = pending.pop(t, None)
                 if fut is not None:
@@ -458,81 +719,108 @@ def render_video(
                     main_panel = last_main_panel
                     side_prev = last_side_prev
 
+                fr = frames[t]
                 item = fr["item"]
                 pose = fr["pose"]
 
-                canvas = Image.new("RGB", (OUT_W, OUT_H), (18, 19, 22))
+                canvas = Image.new("RGB", (out_w, out_h), (18, 19, 22))
                 canvas.paste(main_panel, (0, 0))
                 draw = ImageDraw.Draw(canvas)
 
-                x0 = SIDE_X + PAD
-                # 1. Original frame preview
-                draw.text((x0, 12), "ORIGINAL", fill=(156, 163, 175), font=font_label)
+                x0 = side_x + pad
+                # 1. Original Bad Apple!! template preview
+                draw.text((x0, 12 * s), "BA TEMPLATE", fill=(156, 163, 175), font=font_label)
                 orig_pil = (
                     Image.fromarray(orig_frames_u8[t], mode="L")
-                    .resize((PREV_W, PREV_H), Image.Resampling.LANCZOS)
+                    .resize((prev_w, prev_h), Image.Resampling.LANCZOS)
                     .convert("RGB")
                 )
-                canvas.paste(orig_pil, (x0, 32))
-                draw.rectangle((x0 - 1, 31, x0 + PREV_W, 32 + PREV_H), outline=(42, 45, 52))
+                canvas.paste(orig_pil, (x0, 32 * s))
+                draw.rectangle(
+                    (x0 - border_w, 32 * s - border_w, x0 + prev_w + border_w - 1, 32 * s + prev_h + border_w - 1),
+                    outline=(42, 45, 52),
+                    width=border_w,
+                )
 
-                # 2. Secondary match preview (color crop when main is grayscale, or vice versa)
-                draw.text((x0, 258), side_label, fill=(156, 163, 175), font=font_label)
-                canvas.paste(side_prev, (x0, 278))
-                draw.rectangle((x0 - 1, 277, x0 + PREV_W, 278 + PREV_H), outline=(42, 45, 52))
+                # 2. Secondary match preview (original color photo when main is grayscale, or vice versa)
+                draw.text((x0, 258 * s), side_label, fill=(156, 163, 175), font=font_label)
+                canvas.paste(side_prev, (x0, 278 * s))
+                draw.rectangle(
+                    (x0 - border_w, 278 * s - border_w, x0 + prev_w + border_w - 1, 278 * s + prev_h + border_w - 1),
+                    outline=(42, 45, 52),
+                    width=border_w,
+                )
 
                 # 3. Live NCC sparkline up to current frame t
                 ncc_val = 0.0 if fr.get("is_solid") else float(fr["score_64"])
                 ncc_label = "NCC SOLID" if fr.get("is_solid") else f"NCC {ncc_val:+.3f}"
-                draw.text((x0, 504), ncc_label, fill=(156, 163, 175), font=font_label)
+                draw.text((x0, 504 * s), ncc_label, fill=(156, 163, 175), font=font_label)
 
-                cx0, cy0 = x0, 524
-                cx1, cy1 = x0 + CHART_W - 1, 524 + CHART_H - 1
-                draw.rectangle((cx0, cy0, cx1, cy1), fill=(24, 26, 32), outline=(42, 45, 52))
+                cx0, cy0 = x0, 524 * s
+                cx1, cy1 = x0 + chart_w - 1, 524 * s + chart_h - 1
+                draw.rectangle((cx0, cy0, cx1, cy1), fill=(24, 26, 32), outline=(42, 45, 52), width=border_w)
+                chart_inner_h = chart_h - 6 * s
+                chart_pad_y = 3 * s
                 for ref_score in (0.5, 0.8):
-                    ry = int(round(cy1 - max(0.0, min(1.0, ref_score)) * (CHART_H - 6) - 3))
-                    draw.line((cx0 + 1, ry, cx1 - 1, ry), fill=(38, 42, 50), width=1)
+                    ry = int(round(cy1 - max(0.0, min(1.0, ref_score)) * chart_inner_h - chart_pad_y))
+                    draw.line((cx0 + border_w, ry, cx1 - border_w, ry), fill=(38, 42, 50), width=max(1, s))
 
                 if t > 0:
                     pts: list[tuple[int, int]] = []
-                    for px_col in range(CHART_W):
-                        idx = int(px_col * (n - 1) / max(1, CHART_W - 1))
+                    for px_col in range(chart_w):
+                        idx = int(px_col * (n_total - 1) / max(1, chart_w - 1))
                         if idx > t:
                             break
                         val = max(0.0, min(1.0, ncc_history[idx]))
-                        py = int(round(cy1 - val * (CHART_H - 6) - 3))
+                        py = int(round(cy1 - val * chart_inner_h - chart_pad_y))
                         pts.append((cx0 + px_col, py))
                     if len(pts) >= 2:
-                        draw.line(pts, fill=(56, 189, 248), width=2)
-                dot_x = cx0 + int(round(t * (CHART_W - 1) / max(1, n - 1)))
+                        draw.line(pts, fill=(56, 189, 248), width=max(2, 2 * s))
+                dot_x = cx0 + int(round(t * (chart_w - 1) / max(1, n_total - 1)))
                 dot_val = max(0.0, min(1.0, ncc_val))
-                dot_y = int(round(cy1 - dot_val * (CHART_H - 6) - 3))
-                draw.ellipse((dot_x - 3, dot_y - 3, dot_x + 3, dot_y + 3), fill=(250, 204, 21))
+                dot_y = int(round(cy1 - dot_val * chart_inner_h - chart_pad_y))
+                dot_r = 3 * s
+                draw.ellipse((dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r), fill=(250, 204, 21))
 
-                # 4. Taxon and credit metadata
+                # 4. Taxon, credit metadata, and static mini world map
+                map_x = x0 + prev_w - map_w
+                map_y = 602 * s
+                meta_w = prev_w - map_w - 8 * s
+
                 w_pack, h_pack = item["pack_dims"]
                 cw_max = max_fit_crop_w(float(w_pack), float(h_pack), float(pose["theta"]), margin=0.5)
                 scale_pct = int(round(100.0 * (float(pose["w_frac"]) * float(w_pack)) / max(1.0, cw_max)))
                 rot_deg = int(round(math.degrees(float(pose["theta"])))) % 360
                 mir_tag = " MIR" if pose["mirrored"] else ""
 
-                taxon_txt = font_taxon.truncate(draw, _format_taxon(item), PREV_W)
-                source_txt = font_meta.truncate(draw, _format_source(item), PREV_W)
+                source_txt = font_meta.truncate(draw, _format_source(item), meta_w)
                 country_txt = font_meta.truncate(
-                    draw, f"Location: {item.get('country') or 'Unknown'}", PREV_W
+                    draw, f"Location: {item.get('country') or 'Unknown'}", meta_w
                 )
                 creator = item.get("creator") or "Unknown"
                 lic = item.get("license") or "Unknown"
-                credit_txt = font_meta.truncate(draw, f"{creator} | {lic}", PREV_W)
+                credit_txt = font_meta.truncate(draw, f"{creator} | {lic}", meta_w)
                 stats_txt = (
-                    f"SCALE {scale_pct:3d}%  ROT {rot_deg:3d}d{mir_tag}  F {t + 1:0{frame_digits}d}/{n}"
+                    f"SCALE {scale_pct:3d}%  ROT {rot_deg:3d}d{mir_tag}  F {t + 1:0{frame_digits}d}/{n_total}"
                 )
 
-                font_taxon.draw_text(draw, (x0, 592), taxon_txt, fill=(243, 244, 246))
-                font_meta.draw_text(draw, (x0, 616), source_txt, fill=(209, 213, 219))
-                font_meta.draw_text(draw, (x0, 636), country_txt, fill=(156, 163, 175))
-                font_meta.draw_text(draw, (x0, 656), credit_txt, fill=(156, 163, 175))
-                draw.text((x0, 682), stats_txt, fill=(250, 204, 21), font=font_stats)
+                _draw_taxon(
+                    draw,
+                    (x0, 592 * s),
+                    item,
+                    font_taxon_italic,
+                    font_taxon_regular,
+                    meta_w,
+                    fill=(243, 244, 246),
+                )
+                font_meta.draw_text(draw, (x0, 616 * s), source_txt, fill=(209, 213, 219))
+                font_meta.draw_text(draw, (x0, 634 * s), country_txt, fill=(156, 163, 175))
+                font_meta.draw_text(draw, (x0, 652 * s), credit_txt, fill=(156, 163, 175))
+
+                canvas.paste(map_base, (map_x, map_y))
+                _draw_map_dot(canvas, map_x, map_y, map_w, map_h, s, item, glow_sprite)
+
+                draw.text((x0, 682 * s), stats_txt, fill=(250, 204, 21), font=font_stats)
 
                 if t in still_targets:
                     canvas.save(stills_dir / still_targets[t])
