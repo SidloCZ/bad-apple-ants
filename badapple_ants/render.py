@@ -23,7 +23,20 @@ SIDE_X = 960
 PAD = 16
 PREV_W, PREV_H = 288, 216
 CHART_W, CHART_H = 288, 56
-MAP_W, MAP_H = 112, 56
+MAP_W, MAP_H = 132, 64
+
+_EE_A1 = 1.340264
+_EE_A2 = -0.081106
+_EE_A3 = 0.000893
+_EE_A4 = 0.003796
+_EE_M = math.sqrt(3.0) / 2.0
+_EE_X_MAX = (2.0 * math.sqrt(3.0) * math.pi) / (3.0 * _EE_A1)
+_EE_THETA_MAX = math.pi / 3.0
+_EE_Y_MAX = _EE_THETA_MAX * (
+    _EE_A1
+    + _EE_A2 * (_EE_THETA_MAX**2)
+    + (_EE_THETA_MAX**6) * (_EE_A3 + _EE_A4 * (_EE_THETA_MAX**2))
+)
 
 RESOLUTION_SCALES = {
     "720p": 1,
@@ -275,11 +288,20 @@ def _project_lat_lon(
     map_h: int,
     margin: float = 0.0,
 ) -> tuple[float, float]:
-    """Equirectangular projection of (lat, lon) onto pixel coordinates within map_w x map_h."""
+    """Equal Earth projection of (lat, lon) onto pixel coordinates within map_w x map_h."""
     lat_c = min(90.0, max(-90.0, float(lat)))
     lon_c = min(180.0, max(-180.0, float(lon)))
-    px = ((lon_c + 180.0) / 360.0) * float(max(1, map_w - 1))
-    py = ((90.0 - lat_c) / 180.0) * float(max(1, map_h - 1))
+    phi = math.radians(lat_c)
+    lam = math.radians(lon_c)
+    theta = math.asin(max(-1.0, min(1.0, _EE_M * math.sin(phi))))
+    t2 = theta * theta
+    t6 = t2 * t2 * t2
+    x = (2.0 * math.sqrt(3.0) * lam * math.cos(theta)) / (
+        3.0 * (_EE_A1 + 3.0 * _EE_A2 * t2 + t6 * (7.0 * _EE_A3 + 9.0 * _EE_A4 * t2))
+    )
+    y = theta * (_EE_A1 + _EE_A2 * t2 + t6 * (_EE_A3 + _EE_A4 * t2))
+    px = ((x + _EE_X_MAX) / (2.0 * _EE_X_MAX)) * float(max(1, map_w - 1))
+    py = ((_EE_Y_MAX - y) / (2.0 * _EE_Y_MAX)) * float(max(1, map_h - 1))
     if margin > 0.0:
         px = min(max(margin, px), max(margin, float(map_w - 1) - margin))
         py = min(max(margin, py), max(margin, float(map_h - 1) - margin))
@@ -292,22 +314,15 @@ def _build_world_map_base(
     map_h: int,
     scale: int,
 ) -> Image.Image:
-    """Pre-render static equirectangular mini world map with 2x supersampled Natural Earth land polygons."""
+    """Pre-render static Equal Earth land-only mini world map matching sidebar background."""
     ss = 2
     sw, sh = map_w * ss, map_h * ss
-    bg_color = (24, 26, 32)
-    grid_color = (32, 35, 43)
+    bg_color = (18, 19, 22)
     land_fill = (62, 70, 84)
-    land_outline = (78, 88, 104)
-    border_color = (42, 45, 52)
+    land_outline = (74, 84, 98)
 
     hi = Image.new("RGB", (sw, sh), bg_color)
     hi_draw = ImageDraw.Draw(hi)
-
-    eq_y = int(round(_project_lat_lon(0.0, 0.0, sw, sh)[1]))
-    pm_x = int(round(_project_lat_lon(0.0, 0.0, sw, sh)[0]))
-    hi_draw.line((0, eq_y, sw - 1, eq_y), fill=grid_color, width=max(1, scale))
-    hi_draw.line((pm_x, 0, pm_x, sh - 1), fill=grid_color, width=max(1, scale))
 
     geojson_path = assets_dir / "world_land_110m.geojson"
     if geojson_path.is_file():
@@ -333,10 +348,7 @@ def _build_world_map_base(
                     if len(inner) >= 3:
                         hi_draw.polygon(inner, fill=bg_color, outline=land_outline)
 
-    base = hi.resize((map_w, map_h), Image.Resampling.LANCZOS)
-    draw = ImageDraw.Draw(base)
-    draw.rectangle((0, 0, map_w - 1, map_h - 1), outline=border_color, width=max(1, scale))
-    return base
+    return hi.resize((map_w, map_h), Image.Resampling.LANCZOS)
 
 
 def _build_glow_dot_sprite(scale: int) -> Image.Image:
@@ -392,20 +404,17 @@ def _draw_map_dot(
     if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
         return
 
-    b = max(1, scale)
-    px_rel, py_rel = _project_lat_lon(lat_f, lon_f, map_w, map_h, margin=float(b + 2 * scale))
+    px_rel, py_rel = _project_lat_lon(lat_f, lon_f, map_w, map_h, margin=float(2 * scale))
     half = glow_sprite.width // 2
     gx0 = map_x + int(round(px_rel)) - half
     gy0 = map_y + int(round(py_rel)) - half
     gx1 = gx0 + glow_sprite.width
     gy1 = gy0 + glow_sprite.height
 
-    inner_x0, inner_y0 = map_x + b, map_y + b
-    inner_x1, inner_y1 = map_x + map_w - b, map_y + map_h - b
-    cx0 = max(gx0, inner_x0)
-    cy0 = max(gy0, inner_y0)
-    cx1 = min(gx1, inner_x1)
-    cy1 = min(gy1, inner_y1)
+    cx0 = max(gx0, map_x)
+    cy0 = max(gy0, map_y)
+    cx1 = min(gx1, map_x + map_w)
+    cy1 = min(gy1, map_y + map_h)
     if cx1 <= cx0 or cy1 <= cy0:
         return
 
@@ -588,8 +597,8 @@ def render_video(
     font_label = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 12 * s)
     font_taxon_italic = FontChain.load(assets_dir, "NotoSans-Italic.ttf", 15 * s)
     font_taxon_regular = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 15 * s)
-    font_meta = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 11 * s)
-    font_stats = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 11 * s)
+    font_meta = FontChain.load(assets_dir, "NotoSans-Regular.ttf", 10 * s)
+    font_stats = _load_font(assets_dir, "NotoSansMono-Regular.ttf", 10 * s)
 
     map_base = _build_world_map_base(assets_dir, map_w, map_h, s)
     glow_sprite = _build_glow_dot_sprite(s)
@@ -782,10 +791,10 @@ def render_video(
                 dot_r = 3 * s
                 draw.ellipse((dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r), fill=(250, 204, 21))
 
-                # 4. Taxon, credit metadata, and static mini world map
+                # 4. Taxon, credit metadata, and static Equal Earth mini world map
                 map_x = x0 + prev_w - map_w
-                map_y = 602 * s
-                meta_w = prev_w - map_w - 8 * s
+                map_y = 614 * s
+                meta_w = prev_w - map_w - 6 * s
 
                 w_pack, h_pack = item["pack_dims"]
                 cw_max = max_fit_crop_w(float(w_pack), float(h_pack), float(pose["theta"]), margin=0.5)
@@ -797,30 +806,30 @@ def render_video(
                 country_txt = font_meta.truncate(
                     draw, f"Location: {item.get('country') or 'Unknown'}", meta_w
                 )
-                creator = item.get("creator") or "Unknown"
-                lic = item.get("license") or "Unknown"
-                credit_txt = font_meta.truncate(draw, f"{creator} | {lic}", meta_w)
+                creator_txt = font_meta.truncate(draw, item.get("creator") or "Unknown", meta_w)
+                license_txt = font_meta.truncate(draw, item.get("license") or "Unknown", meta_w)
                 stats_txt = (
                     f"SCALE {scale_pct:3d}%  ROT {rot_deg:3d}d{mir_tag}  F {t + 1:0{frame_digits}d}/{n_total}"
                 )
 
                 _draw_taxon(
                     draw,
-                    (x0, 592 * s),
+                    (x0, 586 * s),
                     item,
                     font_taxon_italic,
                     font_taxon_regular,
-                    meta_w,
+                    prev_w,
                     fill=(243, 244, 246),
                 )
-                font_meta.draw_text(draw, (x0, 616 * s), source_txt, fill=(209, 213, 219))
-                font_meta.draw_text(draw, (x0, 634 * s), country_txt, fill=(156, 163, 175))
-                font_meta.draw_text(draw, (x0, 652 * s), credit_txt, fill=(156, 163, 175))
+                font_meta.draw_text(draw, (x0, 610 * s), source_txt, fill=(209, 213, 219))
+                font_meta.draw_text(draw, (x0, 626 * s), country_txt, fill=(156, 163, 175))
+                font_meta.draw_text(draw, (x0, 642 * s), creator_txt, fill=(156, 163, 175))
+                font_meta.draw_text(draw, (x0, 658 * s), license_txt, fill=(156, 163, 175))
 
                 canvas.paste(map_base, (map_x, map_y))
                 _draw_map_dot(canvas, map_x, map_y, map_w, map_h, s, item, glow_sprite)
 
-                draw.text((x0, 682 * s), stats_txt, fill=(250, 204, 21), font=font_stats)
+                draw.text((x0, 688 * s), stats_txt, fill=(250, 204, 21), font=font_stats)
 
                 if t in still_targets:
                     canvas.save(stills_dir / still_targets[t])

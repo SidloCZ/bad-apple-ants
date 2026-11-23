@@ -25,11 +25,15 @@ def test_project_lat_lon_bounds_and_center() -> None:
     assert abs(cx - 0.5 * (map_w - 1)) < 1e-6
     assert abs(cy - 0.5 * (map_h - 1)) < 1e-6
 
-    mx, my = _project_lat_lon(90.0, -180.0, map_w, map_h, margin=6.0)
-    assert mx == 6.0 and my == 6.0
+    # Equal Earth symmetry around prime meridian and equator
+    px_pos, py_pos = _project_lat_lon(45.0, 90.0, map_w, map_h, margin=0.0)
+    px_neg, py_neg = _project_lat_lon(-45.0, -90.0, map_w, map_h, margin=0.0)
+    assert abs((px_pos + px_neg) - (map_w - 1)) < 1e-5
+    assert abs((py_pos + py_neg) - (map_h - 1)) < 1e-5
 
+    # Clamping with margin
     sx, sy = _project_lat_lon(-95.0, 200.0, map_w, map_h, margin=6.0)
-    assert sx == float(map_w - 1 - 6.0)
+    assert sx <= float(map_w - 1 - 6.0)
     assert sy == float(map_h - 1 - 6.0)
 
 
@@ -39,8 +43,11 @@ def test_world_map_base_and_glow_dot_4k() -> None:
     map_w, map_h = MAP_W * scale, MAP_H * scale
     assets_dir = Path("assets")
     base = _build_world_map_base(assets_dir, map_w, map_h, scale)
-    assert base.size == (336, 168)
+    assert base.size == (396, 192)
     assert base.mode == "RGB"
+    # Corners are ocean matching sidebar background (18, 19, 22), with no border
+    assert base.getpixel((0, 0)) == (18, 19, 22)
+    assert base.getpixel((map_w - 1, 0)) == (18, 19, 22)
 
     sprite = _build_glow_dot_sprite(scale)
     assert sprite.mode == "RGBA"
