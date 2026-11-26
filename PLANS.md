@@ -12,7 +12,7 @@ Forked from upstream reference repository [`ikuto32/bad-apple-earth-moon`](https
   - **Implemented:** `badapple_ants/render.py` (`--main-mode grayscale` default, `grayscale-stretch` 1%–99% percentile tone-mapping, and `color` legacy mode) now renders the `960x720` main panel in grayscale and moves the matched color crop to the `288x216` `COLOR MATCH` sidebar preview.
 - [ ] **Flash and luminance stabilization**
   - Inspect `cuda/video_flash/` in upstream `ikuto32/bad-apple-earth-moon` and add temporal luminance smoothing / flash-limiting across hard cuts where needed so sudden bright-dark swings remain comfortable to watch.
-- [ ] **Optional sidebar telemetry enhancements**
+- [x] **Optional sidebar telemetry enhancements**
   - Add a mini world map plotting specimen/observation coordinates (`lat`/`lon` already preserved in `cache/catalog.jsonl`), a running visited-locations counter, and fixed-width footer alignment matching the upstream editions.
 
 ---

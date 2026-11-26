@@ -518,6 +518,11 @@ def _write_credits(frames: list[dict], out_path: Path) -> None:
         "GBIF Download Citation: GBIF.org (20 November 2026) GBIF Occurrence Download https://doi.org/10.15468/dl.dyc97c",
         "",
         "Per-image attributions (sorted by frame count):",
+        (
+            "Note: [Nf] is the number of video frames (at 29.97 fps) a photo appears on screen. "
+            "High counts (such as 144f) occur during static or solid black/white holds in the "
+            "original animation, where the same photo is held steadily instead of flickering."
+        ),
         "",
     ]
     for iid, item in sorted(seen.items(), key=lambda kv: (-counts[kv[0]], _format_taxon(kv[1]))):
